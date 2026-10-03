@@ -1,0 +1,932 @@
+'use strict';
+/* TeamSheet – lokale voetbal-PWA. Geen account, geen backend. */
+
+const APP_VERSION = '1.0.0';
+const POSITIONS = ['Keeper','Centrale verdediger','Linksback','Rechtsback','Middenvelder','Linksmidden','Rechtsmidden','Aanvallende middenvelder','Linksbuiten','Rechtsbuiten','Spits'];
+const POS_ABBR = {'Keeper':'K','Centrale verdediger':'CV','Linksback':'LV','Rechtsback':'RV','Middenvelder':'M','Linksmidden':'LM','Rechtsmidden':'RM','Aanvallende middenvelder':'AM','Linksbuiten':'LB','Rechtsbuiten':'RB','Spits':'SP'};
+const FORMATIONS = {'4-3-3':[1,4,3,3],'4-4-2':[1,4,4,2],'4-2-3-1':[1,4,2,3,1],'3-5-2':[1,3,5,2],'4-3-2-1':[1,4,3,2,1]};
+const MATCH_LENGTH = 90;
+
+/* ---------- helpers ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'id' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const pad = (n) => String(n).padStart(2, '0');
+function todayStr() { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+function matchDate(m) { return new Date((m.date || todayStr()) + 'T' + (m.time || '00:00')); }
+function fmtDate(m, opts) { return matchDate(m).toLocaleDateString('nl-NL', opts || {day:'numeric', month:'long', year:'numeric'}); }
+function buzz(ms) { try { if (navigator.vibrate) navigator.vibrate(ms || 10); } catch (e) { /* niet ondersteund */ } }
+function isStandalone() { return window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches); }
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+/* ---------- iconen ---------- */
+const ICONS = {
+  team: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14c2.5 0 4.5 2 4.5 4.5"/>',
+  lineup: '<rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="M3 12h18"/><circle cx="12" cy="12" r="3"/>',
+  matches: '<rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  stats: '<path d="M5 21V11M12 21V4M19 21v-8"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+  back: '<path d="M15 5l-7 7 7 7"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  ball: '<circle cx="12" cy="12" r="9"/><path d="M12 7l4 3-1.5 4.5h-5L8 10zM12 7V3M16 10l4-1.5M14.5 14.5l2.5 3.5M9.5 14.5L7 18M8 10L4 8.5"/>',
+  pin: '<path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  cal: '<rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  home: '<path d="M4 11l8-7 8 7v9H4z"/>',
+  trophy: '<path d="M7 4h10v5a5 5 0 0 1-10 0zM7 6H4v1a3 3 0 0 0 3 3M17 6h3v1a3 3 0 0 1-3 3M12 14v4M8 20h8"/>',
+  down: '<path d="M12 4v14M6 12l6 6 6-6"/>',
+  up: '<path d="M12 20V6M6 12l6-6 6 6"/>',
+  camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
+  download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
+  upload: '<path d="M12 16V5M7 9l5-5 5 5M5 20h14"/>'
+};
+const ic = (n, cls) => '<svg class="ic ' + (cls || '') + '" viewBox="0 0 24 24" aria-hidden="true">' + (ICONS[n] || '') + '</svg>';
+
+/* ---------- opslag (IndexedDB, fallback localStorage) ---------- */
+let dbPromise = null;
+function idb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) { reject(new Error('geen IndexedDB')); return; }
+    const req = indexedDB.open('teamsheet', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+async function idbGet(key) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const r = db.transaction('kv').objectStore('kv').get(key);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbSet(key, val) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put(val, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function newLineup(f) { return {formation: FORMATIONS[f] ? f : '4-3-3', positions: Array(11).fill(null), bench: []}; }
+function defaultState() {
+  return {
+    version: 1,
+    team: {id: uid(), name: 'Mijn team', logo: null},
+    settings: {defaultFormation: '4-3-3'},
+    players: [], matches: [], events: [], minutes: {},
+    lineups: {default: newLineup('4-3-3')}
+  };
+}
+function normalize(s) {
+  const d = defaultState();
+  const o = Object.assign(d, s || {});
+  o.team = Object.assign(defaultState().team, (s && s.team) || {});
+  o.settings = Object.assign(defaultState().settings, (s && s.settings) || {});
+  if (!FORMATIONS[o.settings.defaultFormation]) o.settings.defaultFormation = '4-3-3';
+  ['players', 'matches', 'events'].forEach((k) => { if (!Array.isArray(o[k])) o[k] = []; });
+  if (!o.minutes || typeof o.minutes !== 'object') o.minutes = {};
+  if (!o.lineups || typeof o.lineups !== 'object') o.lineups = {};
+  if (!o.lineups.default) o.lineups.default = newLineup(o.settings.defaultFormation);
+  Object.keys(o.lineups).forEach((k) => {
+    const l = o.lineups[k] || newLineup('4-3-3');
+    if (!FORMATIONS[l.formation]) l.formation = '4-3-3';
+    const pos = Array.isArray(l.positions) ? l.positions : [];
+    l.positions = Array.from({length: 11}, (_, i) => pos[i] || null);
+    l.bench = Array.isArray(l.bench) ? l.bench : [];
+    o.lineups[k] = l;
+  });
+  return o;
+}
+
+let state = defaultState();
+let saveTimer = null;
+function save() { clearTimeout(saveTimer); saveTimer = setTimeout(persist, 120); }
+async function persist() {
+  clearTimeout(saveTimer);
+  try { await idbSet('state', state); }
+  catch (e) {
+    try { localStorage.setItem('teamsheet_state', JSON.stringify(state)); }
+    catch (e2) { toast('Opslaan mislukt – maak een backup via Instellingen'); }
+  }
+}
+async function loadState() {
+  try {
+    const s = await idbGet('state');
+    if (s) return normalize(s);
+  } catch (e) { /* val terug op localStorage */ }
+  try {
+    const raw = localStorage.getItem('teamsheet_state');
+    if (raw) return normalize(JSON.parse(raw));
+  } catch (e) { /* negeer */ }
+  return defaultState();
+}
+
+/* ---------- domeinlogica ---------- */
+const P = (id) => state.players.find((p) => p.id === id) || null;
+const fullName = (p) => p ? (p.firstName + ' ' + (p.lastName || '')).trim() : 'Onbekende speler';
+const shortName = (p) => p ? (p.firstName || p.lastName) : '?';
+function myScore(m) { return m.homeAway === 'uit' ? m.awayScore : m.homeScore; }
+function oppScore(m) { return m.homeAway === 'uit' ? m.homeScore : m.awayScore; }
+function setScores(m, my, opp) {
+  my = Math.max(0, Math.min(99, my)); opp = Math.max(0, Math.min(99, opp));
+  if (m.homeAway === 'uit') { m.awayScore = my; m.homeScore = opp; } else { m.homeScore = my; m.awayScore = opp; }
+}
+function outcome(m) {
+  if (m.status !== 'afgerond') return null;
+  const a = myScore(m), b = oppScore(m);
+  return a > b ? 'w' : a === b ? 'd' : 'l';
+}
+
+function formationSlots(name) {
+  const lines = FORMATIONS[name] || FORMATIONS['4-3-3'];
+  const n = lines.length, out = [];
+  lines.forEach((count, li) => {
+    const y = 90 - li * (78 / Math.max(n - 1, 1));
+    const step = count <= 3 ? 27 : Math.min(24, 80 / Math.max(count - 1, 1));
+    const role = li === 0 ? 'K' : li === 1 ? 'VER' : li === n - 1 ? 'AAN' : 'MID';
+    for (let j = 0; j < count; j++) {
+      out.push({x: count === 1 ? 50 : 50 + (j - (count - 1) / 2) * step, y, role});
+    }
+  });
+  return out;
+}
+
+function lineupRemove(l, pid) {
+  l.positions = l.positions.map((x) => (x === pid ? null : x));
+  l.bench = l.bench.filter((x) => x !== pid);
+}
+function lineupBench(l, pid) { lineupRemove(l, pid); l.bench.push(pid); }
+function lineupMove(l, pid, slot) {
+  if (l.positions[slot] === pid) return;
+  const occ = l.positions[slot];
+  let from = null;
+  const si = l.positions.indexOf(pid);
+  if (si >= 0) { from = {t: 'slot', i: si}; l.positions[si] = null; }
+  else {
+    const bi = l.bench.indexOf(pid);
+    if (bi >= 0) { from = {t: 'bench', i: bi}; l.bench.splice(bi, 1); }
+  }
+  l.positions[slot] = pid;
+  if (occ) {
+    if (from && from.t === 'slot') l.positions[from.i] = occ;
+    else if (from && from.t === 'bench') l.bench.splice(Math.min(from.i, l.bench.length), 0, occ);
+  }
+}
+function getLineup(key) {
+  if (!state.lineups[key]) state.lineups[key] = newLineup(state.settings.defaultFormation);
+  const l = state.lineups[key];
+  const ids = new Set(state.players.map((p) => p.id));
+  l.positions = l.positions.map((x) => (x && ids.has(x) ? x : null));
+  l.bench = l.bench.filter((x) => ids.has(x));
+  return l;
+}
+function curLineup() {
+  const key = (ui.lineupKey !== 'default' && state.matches.some((m) => m.id === ui.lineupKey)) ? ui.lineupKey : 'default';
+  ui.lineupKey = key;
+  return getLineup(key);
+}
+
+function removePlayer(id) {
+  state.players = state.players.filter((p) => p.id !== id);
+  Object.values(state.lineups).forEach((l) => lineupRemove(l, id));
+  state.events = state.events.filter((e) => e.playerId !== id && e.outPlayerId !== id);
+  state.events.forEach((e) => { if (e.assistPlayerId === id) e.assistPlayerId = null; });
+  Object.values(state.minutes).forEach((m) => { delete m[id]; });
+}
+function removeMatch(id) {
+  state.matches = state.matches.filter((m) => m.id !== id);
+  delete state.lineups[id]; delete state.minutes[id];
+  state.events = state.events.filter((e) => e.matchId !== id);
+  if (ui.lineupKey === id) ui.lineupKey = 'default';
+}
+
+function participants(matchId) {
+  const l = getLineup(matchId);
+  const ids = l.positions.filter(Boolean).concat(l.bench);
+  const list = ids.map(P).filter(Boolean);
+  return (list.length ? list : state.players.slice()).sort((a, b) => a.number - b.number);
+}
+function autoMinutes(m, overwrite) {
+  const l = getLineup(m.id);
+  const evs = state.events.filter((e) => e.matchId === m.id);
+  const mins = state.minutes[m.id] || (state.minutes[m.id] = {});
+  const starters = new Set(l.positions.filter(Boolean));
+  const all = new Set(l.positions.filter(Boolean).concat(l.bench));
+  all.forEach((pid) => {
+    let start = 0;
+    if (!starters.has(pid)) {
+      const ins = evs.filter((e) => e.type === 'substitution' && e.playerId === pid).map((e) => e.minute);
+      if (!ins.length) return;
+      start = Math.min.apply(null, ins);
+    }
+    let end = MATCH_LENGTH;
+    const outs = evs.filter((e) => e.type === 'substitution' && e.outPlayerId === pid && e.minute >= start).map((e) => e.minute);
+    const reds = evs.filter((e) => e.type === 'redCard' && e.playerId === pid && e.minute >= start).map((e) => e.minute);
+    outs.concat(reds).forEach((v) => { end = Math.min(end, v); });
+    if (overwrite || !mins[pid]) mins[pid] = Math.max(0, end - start);
+  });
+}
+
+function computeStats() {
+  const per = {};
+  state.players.forEach((p) => { per[p.id] = {id: p.id, matches: 0, starts: 0, subs: 0, goals: 0, assists: 0, yellow: 0, red: 0, minutes: 0}; });
+  const team = {played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0};
+  state.matches.filter((m) => m.status === 'afgerond').forEach((m) => {
+    const l = state.lineups[m.id];
+    const mins = state.minutes[m.id] || {};
+    const evs = state.events.filter((e) => e.matchId === m.id);
+    const subIn = new Set(evs.filter((e) => e.type === 'substitution').map((e) => e.playerId));
+    if (l) {
+      l.positions.filter(Boolean).forEach((pid) => {
+        const s = per[pid]; if (!s) return;
+        s.matches++; s.starts++; s.minutes += mins[pid] || 0;
+      });
+      l.bench.forEach((pid) => {
+        const s = per[pid]; if (!s) return;
+        if (subIn.has(pid) || (mins[pid] || 0) > 0) { s.matches++; s.subs++; s.minutes += mins[pid] || 0; }
+      });
+    }
+    evs.forEach((e) => {
+      const s = per[e.playerId];
+      if (e.type === 'goal') {
+        if (s) s.goals++;
+        const a = e.assistPlayerId && per[e.assistPlayerId];
+        if (a) a.assists++;
+      } else if (e.type === 'yellowCard' && s) s.yellow++;
+      else if (e.type === 'redCard' && s) s.red++;
+    });
+    team.played++; team.gf += myScore(m); team.ga += oppScore(m);
+    const o = outcome(m);
+    if (o === 'w') team.won++; else if (o === 'd') team.drawn++; else team.lost++;
+  });
+  return {per, team};
+}
+
+/* ---------- afbeeldingen ---------- */
+function resizeImage(file, size, mode, type) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas'); c.width = size; c.height = size;
+        const g = c.getContext('2d');
+        const w = img.naturalWidth, h = img.naturalHeight;
+        if (type === 'image/jpeg') { g.fillStyle = '#fff'; g.fillRect(0, 0, size, size); }
+        const k = mode === 'cover' ? Math.max(size / w, size / h) : Math.min(size / w, size / h);
+        const dw = w * k, dh = h * k;
+        g.drawImage(img, (size - dw) / 2, (size - dh) / 2, dw, dh);
+        resolve(c.toDataURL(type, 0.82));
+      } catch (e) { reject(e); }
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Afbeelding niet leesbaar')); };
+    img.src = url;
+  });
+}
+
+/* ---------- UI-state ---------- */
+const ui = {tab: 'team', sub: null, modal: null, sel: null, lineupKey: 'default', sort: 'nummer', q: '', statSort: 'goals'};
+let resetScroll = false;
+let formTmp = {};
+let confirmResolve = null;
+
+function render() {
+  const main = $('#main');
+  const st = resetScroll ? 0 : main.scrollTop;
+  const strips = $$('.strip').map((s) => s.scrollLeft);
+  $('#header').innerHTML = headerHTML();
+  main.innerHTML = viewHTML();
+  $('#nav').innerHTML = navHTML();
+  main.scrollTop = st;
+  $$('.strip').forEach((s, i) => { if (strips[i]) s.scrollLeft = strips[i]; });
+  resetScroll = false;
+}
+function goTab(t) { ui.tab = t; ui.sub = null; ui.sel = null; resetScroll = true; render(); }
+function goSub(type, id) { ui.sub = {type, id}; resetScroll = true; render(); }
+function back() { ui.sub = null; resetScroll = true; render(); }
+
+function headerHTML() {
+  if (ui.sub) {
+    const t = ui.sub.type === 'settings' ? 'Instellingen' : ui.sub.type === 'player' ? 'Spelerprofiel' : 'Wedstrijd';
+    return '<button class="hbtn" data-act="back" aria-label="Terug">' + ic('back') + '</button><div class="htitle">' + t + '</div><span class="hbtn ph"></span>';
+  }
+  const logo = state.team.logo ? '<img src="' + state.team.logo + '" alt="">' : '<span class="logo-ball">' + ic('ball', 'sm') + '</span>';
+  return '<div class="brand">' + logo + '<div><b>TeamSheet</b><small>' + esc(state.team.name) + '</small></div></div>' +
+    '<button class="hbtn" data-act="settings" aria-label="Instellingen">' + ic('gear') + '</button>';
+}
+function navHTML() {
+  const items = [['team', 'Team', 'team'], ['lineup', 'Opstelling', 'lineup'], ['matches', 'Wedstrijden', 'matches'], ['stats', 'Statistieken', 'stats']];
+  return items.map((i) => '<button data-tab="' + i[0] + '" class="' + (!ui.sub && ui.tab === i[0] ? 'on' : (ui.sub && ui.tab === i[0] && ui.sub.type !== 'settings' ? 'on' : '')) + '" aria-label="' + i[1] + '">' + ic(i[2]) + '<span>' + i[1] + '</span></button>').join('');
+}
+function viewHTML() {
+  if (ui.sub) {
+    if (ui.sub.type === 'player') return playerDetailHTML(ui.sub.id);
+    if (ui.sub.type === 'match') return matchDetailHTML(ui.sub.id);
+    return settingsHTML();
+  }
+  if (ui.tab === 'lineup') return lineupHTML();
+  if (ui.tab === 'matches') return matchesHTML();
+  if (ui.tab === 'stats') return statsHTML();
+  return teamHTML();
+}
+
+/* ---------- onderdelen ---------- */
+function avatar(p, size) {
+  const s = 'width:' + size + 'px;height:' + size + 'px;font-size:' + Math.round(size * 0.38) + 'px';
+  if (p && p.photo) return '<img class="avatar" style="' + s + '" src="' + p.photo + '" alt="">';
+  const ini = p ? ((p.firstName || '?')[0] + ((p.lastName || '')[0] || '')).toUpperCase() : '?';
+  return '<div class="avatar" style="' + s + '">' + esc(ini) + '</div>';
+}
+function chipHTML(p, selected, drag) {
+  return '<div class="chip' + (selected ? ' sel' : '') + '" data-chip="' + p.id + '"' + (drag ? ' data-drag="' + p.id + '"' : '') + '><div class="num">' + esc(p.number) + '</div><div class="nm">' + esc(shortName(p)) + '</div></div>';
+}
+function statTiles(s, hl, four) {
+  const t = [['matches', 'Wedstrijden', s.matches], ['starts', 'Basis', s.starts], ['subs', 'Ingevallen', s.subs], ['goals', 'Doelpunten', s.goals], ['assists', 'Assists', s.assists], ['yellow', 'Gele kaarten', s.yellow], ['red', 'Rode kaarten', s.red], ['minutes', 'Minuten', s.minutes]];
+  return '<div class="tiles four">' + t.map((x) => '<div class="tile' + (hl === x[0] ? ' hl' : '') + '"><b>' + x[2] + '</b><span>' + x[1] + '</span></div>').join('') + '</div>';
+}
+function emptyState(icon, text, btn, act) {
+  return '<div class="card empty"><div class="big">' + icon + '</div><p>' + text + '</p><button class="btn" data-act="' + act + '">' + btn + '</button></div>';
+}
+
+/* ---------- TEAM ---------- */
+function filteredPlayers() {
+  const q = ui.q.trim().toLowerCase();
+  let list = state.players.filter((p) => !q || (fullName(p).toLowerCase().includes(q) || String(p.number) === q || p.position.toLowerCase().includes(q)));
+  const cmp = {
+    nummer: (a, b) => a.number - b.number,
+    naam: (a, b) => (a.firstName + a.lastName).localeCompare(b.firstName + b.lastName, 'nl'),
+    positie: (a, b) => POSITIONS.indexOf(a.position) - POSITIONS.indexOf(b.position) || a.number - b.number
+  }[ui.sort];
+  return list.sort(cmp);
+}
+function playerListHTML() {
+  const list = filteredPlayers();
+  if (!list.length) return '<p class="muted" style="text-align:center;padding:24px 0">Geen spelers gevonden.</p>';
+  return '<div class="list">' + list.map((p) =>
+    '<button class="card rowcard" data-act="player" data-id="' + p.id + '">' + avatar(p, 50) +
+    '<div class="mid"><div class="nm">' + esc(fullName(p)) + '</div><div class="ps">' + esc(p.position) + '</div></div>' +
+    '<div class="bignum">' + esc(p.number) + '</div></button>').join('') + '</div>';
+}
+function teamHTML() {
+  const head = '<h1>Mijn team</h1><p class="sub">' + esc(state.team.name) + ' · ' + state.players.length + ' speler' + (state.players.length === 1 ? '' : 's') + '</p>';
+  if (!state.players.length) {
+    return '<div class="page">' + head + '<div style="margin-top:16px">' + emptyState('👟', 'Je hebt nog geen spelers toegevoegd.', '+ Eerste speler toevoegen', 'addPlayer') + '</div></div>';
+  }
+  const sorts = [['nummer', 'Rugnummer'], ['naam', 'Naam'], ['positie', 'Positie']];
+  return '<div class="page">' + head +
+    '<button class="btn" style="margin-top:16px" data-act="addPlayer">+ Speler toevoegen</button>' +
+    '<input class="search" id="q" type="search" placeholder="Zoek speler…" value="' + esc(ui.q) + '" autocomplete="off">' +
+    '<div class="pills">' + sorts.map((s) => '<button class="pill' + (ui.sort === s[0] ? ' on' : '') + '" data-act="sort" data-v="' + s[0] + '">' + s[1] + '</button>').join('') + '</div>' +
+    '<div id="playerList" style="margin-top:6px">' + playerListHTML() + '</div></div>';
+}
+function playerDetailHTML(id) {
+  const p = P(id);
+  if (!p) return '<div class="page"><p class="muted">Speler niet gevonden.</p></div>';
+  const s = computeStats().per[p.id];
+  return '<div class="page stack"><div class="card" style="text-align:center">' + avatar(p, 108) +
+    '<h2 style="margin-top:10px;font-size:24px">' + esc(fullName(p)) + '</h2>' +
+    '<p class="sub" style="font-size:16px">#' + esc(p.number) + ' · ' + esc(p.position) + '</p></div>' +
+    '<div class="card"><h3 style="margin-bottom:10px">Statistieken</h3>' + statTiles(s) +
+    '<p class="muted" style="font-size:12px;margin-top:8px">Alleen afgeronde wedstrijden tellen mee.</p></div>' +
+    '<button class="btn" data-act="editPlayer" data-id="' + p.id + '">Speler bewerken</button></div>';
+}
+
+/* ---------- OPSTELLING ---------- */
+function pitchHTML(l) {
+  const slots = formationSlots(l.formation);
+  const lines = '<svg class="pitch-lines" viewBox="0 0 68 105" preserveAspectRatio="none" fill="none" stroke="rgba(255,255,255,.85)" stroke-width=".5">' +
+    '<rect x="2" y="2" width="64" height="101"/><path d="M2 52.5h64"/><circle cx="34" cy="52.5" r="9.15"/><circle cx="34" cy="52.5" r=".7" fill="#fff"/>' +
+    '<rect x="13.85" y="2" width="40.3" height="16.5"/><rect x="13.85" y="86.5" width="40.3" height="16.5"/>' +
+    '<rect x="24.85" y="2" width="18.3" height="5.5"/><rect x="24.85" y="97.5" width="18.3" height="5.5"/>' +
+    '<circle cx="34" cy="13" r=".7" fill="#fff"/><circle cx="34" cy="92" r=".7" fill="#fff"/>' +
+    '<path d="M26.7 18.5a9.15 9.15 0 0 0 14.6 0M26.7 86.5a9.15 9.15 0 0 1 14.6 0"/></svg>';
+  return '<div class="pitch">' + lines + slots.map((s, i) => {
+    const p = P(l.positions[i]);
+    const inner = p ? chipHTML(p, ui.sel === p.id, true) : '<div class="ghostchip">+</div><span class="role">' + s.role + '</span>';
+    return '<div class="slot' + (p && ui.sel === p.id ? ' sel' : '') + '" data-slot="' + i + '" data-drop="slot" style="left:' + s.x + '%;top:' + s.y + '%">' + inner + '</div>';
+  }).join('') + '</div>';
+}
+function lineupHTML() {
+  const l = curLineup();
+  const starters = l.positions.filter(Boolean).length;
+  const used = new Set(l.positions.filter(Boolean).concat(l.bench));
+  const pool = state.players.filter((p) => !used.has(p.id)).sort((a, b) => a.number - b.number);
+  const bench = l.bench.map(P).filter(Boolean);
+  const keyOpts = '<option value="default"' + (ui.lineupKey === 'default' ? ' selected' : '') + '>Standaardopstelling</option>' +
+    state.matches.slice().sort((a, b) => matchDate(b) - matchDate(a)).map((m) => '<option value="' + m.id + '"' + (ui.lineupKey === m.id ? ' selected' : '') + '>vs ' + esc(m.opponent) + ' · ' + fmtDate(m, {day: 'numeric', month: 'short'}) + '</option>').join('');
+  const fOpts = Object.keys(FORMATIONS).map((f) => '<option' + (l.formation === f ? ' selected' : '') + '>' + f + '</option>').join('');
+  const strip = (arr, drop, hint) => '<div class="strip" data-drop="' + drop + '">' + (arr.length ? arr.map((p) => chipHTML(p, ui.sel === p.id, true)).join('') : '<span class="hint">' + hint + '</span>') + '</div>';
+  let selbar = '';
+  if (ui.sel && P(ui.sel)) {
+    const inL = used.has(ui.sel);
+    selbar = '<div class="selbar"><b>Geselecteerd: ' + esc(P(ui.sel).number) + ' ' + esc(fullName(P(ui.sel))) + ' — tik op een positie</b>' +
+      '<button data-act="selBench">Naar bank</button>' + (inL ? '<button data-act="selRemove">Uit opstelling</button>' : '') + '<button class="x" data-act="selClear">Annuleer</button></div>';
+  }
+  return '<div class="page"><h1>Opstelling</h1>' +
+    '<label class="field"><span>Opstelling voor</span><select data-change="lineupKey">' + keyOpts + '</select></label>' +
+    '<label class="field" style="margin-bottom:14px"><span>Formatie</span><select data-change="formation">' + fOpts + '</select></label>' +
+    pitchHTML(l) +
+    '<p class="sub" style="text-align:center;margin-top:10px"><b>' + starters + '/11</b> basis · <b>' + bench.length + '</b> op de bank</p>' +
+    '<section class="blk"><div class="between"><h3>Wisselspelers<span class="count">' + bench.length + '</span></h3><button class="btn small ghost" data-act="pickBenchOpen">' + ic('plus', 'sm') + ' Toevoegen</button></div>' +
+    strip(bench, 'bench', 'Tik of sleep hier spelers naartoe') + '</section>' +
+    '<section class="blk"><div class="between"><h3>Beschikbaar<span class="count">' + pool.length + '</span></h3></div>' +
+    strip(pool, 'pool', state.players.length ? 'Alle spelers staan in de opstelling' : 'Voeg eerst spelers toe in Team') + '</section>' +
+    '<p class="sub" style="text-align:center;margin-top:16px">Tik op een speler en daarna op een positie, of sleep een speler met je vinger. Een bezette positie wisselt automatisch.</p>' +
+    selbar + '</div>';
+}
+function onSlot(i) {
+  const l = curLineup(); const occ = l.positions[i];
+  if (ui.sel) {
+    if (occ === ui.sel) ui.sel = null;
+    else { lineupMove(l, ui.sel, i); ui.sel = null; buzz(); save(); }
+    render(); return;
+  }
+  if (occ) { ui.sel = occ; render(); }
+  else openModal('pick', {slot: i});
+}
+function onChip(id) { ui.sel = ui.sel === id ? null : id; render(); }
+
+/* ---------- WEDSTRIJDEN ---------- */
+function matchesHTML() {
+  const head = '<h1>Wedstrijden</h1>';
+  if (!state.matches.length) return '<div class="page">' + head + '<div style="margin-top:16px">' + emptyState('📅', 'Nog geen wedstrijden.', '+ Nieuwe wedstrijd', 'addMatch') + '</div></div>';
+  const up = state.matches.filter((m) => m.status !== 'afgerond').sort((a, b) => matchDate(a) - matchDate(b));
+  const done = state.matches.filter((m) => m.status === 'afgerond').sort((a, b) => matchDate(b) - matchDate(a));
+  const row = (m) => {
+    const o = outcome(m);
+    const right = o ? '<span class="badge ' + o + '">' + myScore(m) + ' – ' + oppScore(m) + '</span>' : '<span class="muted" style="font-weight:700">' + esc(m.time || '') + '</span>';
+    return '<button class="card rowcard" data-act="match" data-id="' + m.id + '"><div class="dateblk"><b>' + matchDate(m).getDate() + '</b><span>' + matchDate(m).toLocaleDateString('nl-NL', {month: 'short'}).replace('.', '') + '</span></div>' +
+      '<div class="mid"><div class="nm">vs ' + esc(m.opponent) + '</div><div class="ps">' + (m.homeAway === 'uit' ? 'Uit' : 'Thuis') + (m.competition ? ' · ' + esc(m.competition) : '') + '</div></div>' + right + '</button>';
+  };
+  return '<div class="page">' + head + '<button class="btn" style="margin-top:14px" data-act="addMatch">+ Nieuwe wedstrijd</button>' +
+    (up.length ? '<section class="blk"><h3 style="margin-bottom:10px">Aankomend</h3><div class="list">' + up.map(row).join('') + '</div></section>' : '') +
+    (done.length ? '<section class="blk"><h3 style="margin-bottom:10px">Gespeeld</h3><div class="list">' + done.map(row).join('') + '</div></section>' : '') + '</div>';
+}
+function evMinute(e) { return '<div class="min">' + e.minute + '\u2019</div>'; }
+function matchDetailHTML(id) {
+  const m = state.matches.find((x) => x.id === id);
+  if (!m) return '<div class="page"><p class="muted">Wedstrijd niet gevonden.</p></div>';
+  const l = getLineup(m.id);
+  const evs = state.events.filter((e) => e.matchId === m.id).sort((a, b) => a.minute - b.minute);
+  const goals = evs.filter((e) => e.type === 'goal');
+  const cards = evs.filter((e) => e.type === 'yellowCard' || e.type === 'redCard');
+  const subs = evs.filter((e) => e.type === 'substitution');
+  const mins = state.minutes[m.id] || {};
+  const starters = l.positions.filter(Boolean).map(P).filter(Boolean);
+  const bench = l.bench.map(P).filter(Boolean);
+  const del = (e) => '<button class="iconbtn dang" data-act="delEvent" data-id="' + e.id + '" aria-label="Verwijder">' + ic('x', 'sm') + '</button>';
+  const score = m.status === 'afgerond' || myScore(m) + oppScore(m) > 0;
+  const kv = (icon, txt) => '<div class="kv">' + ic(icon) + '<span>' + txt + '</span></div>';
+  const parts = participants(m.id);
+  const minRows = parts.map((p) => {
+    const st = l.positions.includes(p.id) ? 'Basis' : (mins[p.id] > 0 || subs.some((s) => s.playerId === p.id) ? 'Ingevallen' : 'Bank');
+    return '<div class="minrow">' + avatar(p, 36) + '<div class="mid">' + esc(p.number) + ' · ' + esc(fullName(p)) + '<small>' + st + '</small></div>' +
+      '<div class="stepper dark"><button data-act="min" data-id="' + p.id + '" data-d="-5" aria-label="Min 5">−</button><b>' + (mins[p.id] || 0) + '</b><button data-act="min" data-id="' + p.id + '" data-d="5" aria-label="Plus 5">+</button></div></div>';
+  }).join('');
+  return '<div class="page stack">' +
+    '<div class="scorecard">' + (m.competition ? '<small>' + esc(m.competition) + '</small>' : '') +
+    '<div class="teams" style="margin-top:8px"><div class="tn">' + esc(state.team.name) + '</div><div class="sc">' + (score ? myScore(m) + ' — ' + oppScore(m) : 'vs') + '</div><div class="tn">' + esc(m.opponent) + '</div></div>' +
+    '<div class="between" style="margin-top:14px"><div class="stepper"><button data-act="score" data-who="my" data-d="-1">−</button><b>' + myScore(m) + '</b><button data-act="score" data-who="my" data-d="1">+</button></div>' +
+    '<small>Uitslag invoeren</small>' +
+    '<div class="stepper"><button data-act="score" data-who="opp" data-d="-1">−</button><b>' + oppScore(m) + '</b><button data-act="score" data-who="opp" data-d="1">+</button></div></div>' +
+    (goals.length !== myScore(m) && goals.length ? '<button class="btn small" style="margin-top:12px;background:rgba(255,255,255,.18);box-shadow:none" data-act="takeGoals">Neem ' + goals.length + ' geregistreerde doelpunten over</button>' : '') + '</div>' +
+    '<div class="card"><div class="seg" style="margin-bottom:6px"><label><input type="radio" name="st" ' + (m.status !== 'afgerond' ? 'checked' : '') + ' data-change="status" value="gepland"><span>Gepland</span></label><label><input type="radio" name="st" ' + (m.status === 'afgerond' ? 'checked' : '') + ' data-change="status" value="afgerond"><span>Afgerond</span></label></div>' +
+    kv('cal', esc(fmtDate(m, {weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'}))) + kv('clock', esc(m.time || '–')) +
+    kv(m.homeAway === 'uit' ? 'trophy' : 'home', m.homeAway === 'uit' ? 'Uitwedstrijd' : 'Thuiswedstrijd') +
+    (m.location ? kv('pin', esc(m.location)) : '') + '</div>' +
+    '<div class="card"><div class="between"><h3>Opstelling · ' + l.formation + '</h3></div>' +
+    '<p class="sub" style="margin:6px 0 10px">Basiself: ' + (starters.length ? starters.map((p) => esc(p.number + ' ' + shortName(p))).join(', ') : 'nog niet gekozen') + '</p>' +
+    (bench.length ? '<p class="sub" style="margin-bottom:10px">Wissels: ' + bench.map((p) => esc(p.number + ' ' + shortName(p))).join(', ') + '</p>' : '') +
+    '<button class="btn sec" data-act="openLineup" data-id="' + m.id + '">Opstelling openen</button></div>' +
+    '<div class="card"><div class="between"><h3>Doelpunten<span class="count">' + goals.length + '</span></h3><button class="btn small ghost" data-act="addGoal">' + ic('plus', 'sm') + ' Doelpunt</button></div>' +
+    goals.map((e) => '<div class="ev">' + evMinute(e) + '<div class="tx">⚽ ' + esc(fullName(P(e.playerId))) + (e.assistPlayerId ? '<small>Assist: ' + esc(fullName(P(e.assistPlayerId))) + '</small>' : '') + '</div>' + del(e) + '</div>').join('') + '</div>' +
+    '<div class="card"><div class="between"><h3>Kaarten<span class="count">' + cards.length + '</span></h3><button class="btn small ghost" data-act="addCard">' + ic('plus', 'sm') + ' Kaart</button></div>' +
+    cards.map((e) => '<div class="ev">' + evMinute(e) + '<div class="tx" style="display:flex;align-items:center;gap:8px"><span class="cardico" style="background:' + (e.type === 'redCard' ? 'var(--red)' : 'var(--yellow)') + '"></span>' + esc(fullName(P(e.playerId))) + '</div>' + del(e) + '</div>').join('') + '</div>' +
+    '<div class="card"><div class="between"><h3>Wissels<span class="count">' + subs.length + '</span></h3><button class="btn small ghost" data-act="addSub">' + ic('plus', 'sm') + ' Wissel</button></div>' +
+    subs.map((e) => '<div class="ev">' + evMinute(e) + '<div class="tx">▲ ' + esc(fullName(P(e.playerId))) + '<small>▼ ' + esc(fullName(P(e.outPlayerId))) + '</small></div>' + del(e) + '</div>').join('') + '</div>' +
+    '<div class="card"><div class="between"><h3>Minuten gespeeld</h3></div>' +
+    (parts.length ? minRows + '<button class="btn sec" style="margin-top:12px" data-act="autoMinutes">Minuten automatisch invullen</button>' : '<p class="sub">Voeg eerst spelers toe.</p>') + '</div>' +
+    (m.notes ? '<div class="card"><h3 style="margin-bottom:6px">Notitie</h3><p style="white-space:pre-wrap">' + esc(m.notes) + '</p></div>' : '') +
+    '<button class="btn sec" data-act="editMatch" data-id="' + m.id + '">Wedstrijd bewerken</button>' +
+    '<button class="btn danger" data-act="deleteMatch" data-id="' + m.id + '">Wedstrijd verwijderen</button></div>';
+}
+
+/* ---------- STATISTIEKEN ---------- */
+function statsHTML() {
+  const {per, team} = computeStats();
+  const sorts = [['goals', 'Doelpunten'], ['assists', 'Assists'], ['matches', 'Wedstrijden'], ['minutes', 'Minuten'], ['yellow', 'Geel'], ['red', 'Rood']];
+  const key = ui.statSort;
+  const list = state.players.map((p) => per[p.id]).sort((a, b) => b[key] - a[key] || b.goals - a.goals || 0);
+  const unit = {goals: 'goals', assists: 'assists', matches: 'wedstr.', minutes: 'min.', yellow: 'geel', red: 'rood'}[key];
+  const diff = team.gf - team.ga;
+  return '<div class="page stack"><h1>Statistieken</h1>' +
+    '<div class="card"><h3 style="margin-bottom:10px">' + esc(state.team.name) + '</h3><div class="tiles">' +
+    [['Wedstrijden', team.played], ['Gewonnen', team.won], ['Gelijk', team.drawn], ['Verloren', team.lost], ['Doelpunten voor', team.gf], ['Doelpunten tegen', team.ga]].map((t) => '<div class="tile"><b>' + t[1] + '</b><span>' + t[0] + '</span></div>').join('') +
+    '</div><div class="tile" style="margin-top:8px"><b>' + (diff > 0 ? '+' : '') + diff + '</b><span>Doelsaldo</span></div>' +
+    '<p class="muted" style="font-size:12px;margin-top:8px">Alleen wedstrijden met status “Afgerond” tellen mee.</p></div>' +
+    '<div><h2>Spelersranglijst</h2><div class="pills">' + sorts.map((s) => '<button class="pill' + (key === s[0] ? ' on' : '') + '" data-act="statSort" data-v="' + s[0] + '">' + s[1] + '</button>').join('') + '</div></div>' +
+    (list.length ? list.map((s, i) => {
+      const p = P(s.id);
+      return '<button class="card" style="width:100%;text-align:left" data-act="player" data-id="' + p.id + '"><div class="rank"><div class="pos' + (i === 0 && s[key] > 0 ? ' p1' : '') + '">' + (i + 1) + '</div>' + avatar(p, 38) +
+        '<div style="min-width:0"><b>' + esc(fullName(p)) + '</b><div class="muted" style="font-size:13px">#' + esc(p.number) + ' · ' + esc(p.position) + '</div></div><div class="val">' + s[key] + '<span class="muted" style="font-size:12px;font-weight:700"> ' + unit + '</span></div></div>' + statTiles(s, key) + '</button>';
+    }).join('') : '<div class="card empty"><p>Voeg spelers en wedstrijden toe om statistieken te zien.</p></div>') + '</div>';
+}
+
+/* ---------- INSTELLINGEN ---------- */
+function installSteps() {
+  return '<ol><li>Open TeamSheet in <b>Safari</b>.</li><li>Tik op <b>Deel</b> (vierkantje met pijl omhoog).</li><li>Kies <b>‘Zet op beginscherm’</b>.</li><li>Tik op <b>Voeg toe</b>.</li></ol>';
+}
+function settingsHTML() {
+  const fOpts = Object.keys(FORMATIONS).map((f) => '<option' + (state.settings.defaultFormation === f ? ' selected' : '') + '>' + f + '</option>').join('');
+  const logo = state.team.logo ? '<img class="logo-prev" src="' + state.team.logo + '" alt="">' : '<div class="logo-prev">Geen logo</div>';
+  return '<div class="page stack">' +
+    '<div class="card"><h3>Team</h3><label class="field"><span>Teamnaam</span><input id="teamName" data-change="teamName" value="' + esc(state.team.name) + '" maxlength="40" autocomplete="off"></label>' +
+    '<div class="photo-row" style="margin-top:14px">' + logo + '<div style="flex:1;display:grid;gap:8px"><label class="btn small sec" style="width:100%">' + ic('camera', 'sm') + ' Logo kiezen<input type="file" accept="image/*" data-change="logo" hidden></label>' +
+    (state.team.logo ? '<button class="btn small danger" style="width:100%" data-act="removeLogo">Logo verwijderen</button>' : '') + '</div></div>' +
+    '<label class="field"><span>Standaardformatie</span><select data-change="defaultFormation">' + fOpts + '</select></label></div>' +
+    '<div class="card"><h3>Gegevens</h3><p class="sub" style="margin:4px 0 12px">Alles staat alleen op dit toestel. Maak regelmatig een backup.</p>' +
+    '<div class="list"><button class="btn sec" data-act="export">' + ic('download', 'sm') + ' Exporteer gegevens</button>' +
+    '<label class="btn sec">' + ic('upload', 'sm') + ' Importeer gegevens<input type="file" accept=".json,application/json" data-change="import" hidden></label>' +
+    '<button class="btn danger" data-act="wipe">Alle gegevens verwijderen</button></div></div>' +
+    '<div class="card inst"><h3>Installeren op je beginscherm</h3>' + installSteps() + '<p class="sub">Daarna opent TeamSheet als een gewone app, ook zonder internet.</p>' +
+    '<p class="sub" style="margin-top:6px">Status: ' + (isStandalone() ? '✅ geïnstalleerd' : 'draait in de browser') + '</p></div>' +
+    '<p class="sub" style="text-align:center">TeamSheet versie ' + APP_VERSION + '</p></div>';
+}
+
+/* ---------- MODALS ---------- */
+function openModal(type, data) { ui.modal = Object.assign({type}, data || {}); renderModal(); }
+function closeModal() {
+  ui.modal = null; renderModal();
+  if (confirmResolve) { const r = confirmResolve; confirmResolve = null; r(false); }
+}
+function askConfirm(title, text, ok) {
+  return new Promise((resolve) => { confirmResolve = resolve; openModal('confirm', {title, text, ok}); });
+}
+function renderModal() {
+  const el = $('#modal');
+  if (!ui.modal) { el.className = ''; el.innerHTML = ''; return; }
+  el.className = 'open';
+  el.innerHTML = '<div class="backdrop" data-backdrop></div><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>' + modalHTML(ui.modal) + '</div>';
+}
+const playerOpts = (list, sel, blank) => (blank ? '<option value="">' + blank + '</option>' : '') + list.map((p) => '<option value="' + p.id + '"' + (sel === p.id ? ' selected' : '') + '>' + esc(p.number + ' · ' + fullName(p)) + '</option>').join('');
+function minuteField(v) { return '<label class="field"><span>Minuut</span><input name="minute" type="number" inputmode="numeric" min="1" max="130" value="' + v + '" required></label>'; }
+function formActions(label) { return '<div class="actions"><button type="button" class="btn sec" data-act="closeModal">Annuleren</button><button type="submit" class="btn">' + (label || 'Opslaan') + '</button></div>'; }
+
+function modalHTML(m) {
+  if (m.type === 'confirm') {
+    return '<h2>' + esc(m.title) + '</h2><p class="sub" style="margin-top:6px">' + esc(m.text || '') + '</p>' +
+      '<div class="actions"><button class="btn sec" data-act="closeModal">Annuleren</button><button class="btn solid-danger" data-act="confirmYes">' + esc(m.ok || 'Ja') + '</button></div>';
+  }
+  if (m.type === 'install') {
+    return '<div class="inst"><h2>TeamSheet aan je beginscherm toevoegen?</h2>' + installSteps() +
+      '<p class="sub">Dan opent TeamSheet als echte app, ook zonder internet.</p></div>' +
+      '<div class="actions"><button class="btn sec" data-act="installNever">Niet meer tonen</button><button class="btn" data-act="closeModal">Begrepen</button></div>';
+  }
+  if (m.type === 'pick') {
+    const l = curLineup();
+    const players = state.players.slice().sort((a, b) => a.number - b.number);
+    return '<h2>Kies speler</h2><p class="sub">Voor deze positie</p><div class="picklist" style="margin-top:8px">' + (players.length ? players.map((p) => {
+      const tag = l.positions.includes(p.id) ? 'Basis' : l.bench.includes(p.id) ? 'Bank' : '';
+      return '<button data-act="pickPlayer" data-id="' + p.id + '" data-slot="' + m.slot + '">' + avatar(p, 40) + '<div><b>' + esc(p.number + ' · ' + fullName(p)) + '</b><div class="muted" style="font-size:13px">' + esc(p.position) + '</div></div>' + (tag ? '<span class="tag">' + tag + '</span>' : '') + '</button>';
+    }).join('') : '<p class="sub" style="padding:16px 0">Voeg eerst spelers toe in het tabblad Team.</p>') + '</div><div class="actions"><button class="btn sec" data-act="closeModal">Sluiten</button></div>';
+  }
+  if (m.type === 'pickBench') {
+    const l = curLineup();
+    const used = new Set(l.positions.filter(Boolean).concat(l.bench));
+    const players = state.players.filter((p) => !used.has(p.id)).sort((a, b) => a.number - b.number);
+    return '<h2>Wisselspeler toevoegen</h2><div class="picklist" style="margin-top:8px">' + (players.length ? players.map((p) =>
+      '<button data-act="pickBench" data-id="' + p.id + '">' + avatar(p, 40) + '<div><b>' + esc(p.number + ' · ' + fullName(p)) + '</b><div class="muted" style="font-size:13px">' + esc(p.position) + '</div></div></button>').join('') : '<p class="sub" style="padding:16px 0">Geen beschikbare spelers.</p>') + '</div><div class="actions"><button class="btn sec" data-act="closeModal">Sluiten</button></div>';
+  }
+  if (m.type === 'player') {
+    const p = m.id ? P(m.id) : null;
+    formTmp = {photo: p ? p.photo : null};
+    return '<form data-form="player" autocomplete="off"><h2>' + (p ? 'Speler bewerken' : 'Speler toevoegen') + '</h2>' +
+      '<div class="photo-row"><div id="photoPrev">' + avatar(p ? Object.assign({}, p, {photo: formTmp.photo}) : null, 72) + '</div><div style="flex:1;display:grid;gap:8px">' +
+      '<label class="btn small sec" style="width:100%">' + ic('camera', 'sm') + ' Foto kiezen<input type="file" accept="image/*" data-change="photo" hidden></label>' +
+      '<button type="button" class="btn small danger" style="width:100%" data-act="clearPhoto">Foto verwijderen</button></div></div>' +
+      '<div class="grid2"><label class="field"><span>Voornaam</span><input name="firstName" value="' + esc(p ? p.firstName : '') + '" required autocapitalize="words"></label>' +
+      '<label class="field"><span>Achternaam</span><input name="lastName" value="' + esc(p ? p.lastName : '') + '" autocapitalize="words"></label></div>' +
+      '<label class="field"><span>Rugnummer</span><input name="number" type="number" inputmode="numeric" min="0" max="999" value="' + (p ? p.number : '') + '" required></label>' +
+      '<label class="field"><span>Positie</span><select name="position">' + POSITIONS.map((x) => '<option' + ((p ? p.position : 'Middenvelder') === x ? ' selected' : '') + '>' + x + '</option>').join('') + '</select></label>' +
+      formActions() + (p ? '<button type="button" class="btn danger" style="margin-top:10px" data-act="deletePlayer" data-id="' + p.id + '">Speler verwijderen</button>' : '') + '</form>';
+  }
+  if (m.type === 'match') {
+    const x = m.id ? state.matches.find((q) => q.id === m.id) : null;
+    return '<form data-form="match" autocomplete="off"><h2>' + (x ? 'Wedstrijd bewerken' : 'Nieuwe wedstrijd') + '</h2>' +
+      '<label class="field"><span>Tegenstander</span><input name="opponent" value="' + esc(x ? x.opponent : '') + '" required autocapitalize="words"></label>' +
+      '<div class="grid2"><label class="field"><span>Datum</span><input name="date" type="date" value="' + (x ? x.date : todayStr()) + '" required></label>' +
+      '<label class="field"><span>Tijd</span><input name="time" type="time" value="' + (x ? x.time : '14:00') + '"></label></div>' +
+      '<div class="field"><span>Thuis / Uit</span><div class="seg"><label><input type="radio" name="homeAway" value="thuis" ' + (!x || x.homeAway !== 'uit' ? 'checked' : '') + '><span>Thuis</span></label><label><input type="radio" name="homeAway" value="uit" ' + (x && x.homeAway === 'uit' ? 'checked' : '') + '><span>Uit</span></label></div></div>' +
+      '<label class="field"><span>Locatie</span><input name="location" value="' + esc(x ? x.location : '') + '"></label>' +
+      '<label class="field"><span>Competitie</span><input name="competition" value="' + esc(x ? x.competition : '') + '"></label>' +
+      '<label class="field"><span>Notitie</span><textarea name="notes">' + esc(x ? x.notes : '') + '</textarea></label>' + formActions() + '</form>';
+  }
+  const parts = participants(m.matchId);
+  if (m.type === 'goal') {
+    return '<form data-form="goal"><h2>Doelpunt</h2>' + minuteField(1) +
+      '<label class="field"><span>Doelpuntenmaker</span><select name="scorer" required>' + playerOpts(parts, '', 'Kies speler') + '</select></label>' +
+      '<label class="field"><span>Assist (optioneel)</span><select name="assist">' + playerOpts(parts, '', 'Geen assist') + '</select></label>' + formActions() + '</form>';
+  }
+  if (m.type === 'card') {
+    return '<form data-form="card"><h2>Kaart</h2><div class="field"><span>Soort kaart</span><div class="seg"><label><input type="radio" name="kind" value="yellowCard" checked><span>🟨 Geel</span></label><label><input type="radio" name="kind" value="redCard"><span>🟥 Rood</span></label></div></div>' +
+      minuteField(1) + '<label class="field"><span>Speler</span><select name="player" required>' + playerOpts(parts, '', 'Kies speler') + '</select></label>' + formActions() + '</form>';
+  }
+  if (m.type === 'sub') {
+    return '<form data-form="sub"><h2>Wissel</h2>' + minuteField(60) +
+      '<label class="field"><span>Eruit</span><select name="out" required>' + playerOpts(parts, '', 'Kies speler') + '</select></label>' +
+      '<label class="field"><span>Erin</span><select name="in" required>' + playerOpts(parts, '', 'Kies speler') + '</select></label>' + formActions() + '</form>';
+  }
+  return '';
+}
+
+/* formulieren */
+const forms = {
+  player(fd) {
+    const first = String(fd.get('firstName') || '').trim();
+    const last = String(fd.get('lastName') || '').trim();
+    const num = parseInt(fd.get('number'), 10);
+    if (!first) { toast('Vul een voornaam in'); return; }
+    if (!(num >= 0 && num <= 999)) { toast('Vul een geldig rugnummer in'); return; }
+    const pos = POSITIONS.includes(fd.get('position')) ? fd.get('position') : 'Middenvelder';
+    const id = ui.modal.id;
+    const dup = state.players.some((p) => p.number === num && p.id !== id);
+    if (id && P(id)) {
+      Object.assign(P(id), {firstName: first, lastName: last, number: num, position: pos, photo: formTmp.photo || null});
+    } else {
+      state.players.push({id: uid(), firstName: first, lastName: last, number: num, position: pos, photo: formTmp.photo || null});
+    }
+    save(); ui.modal = null; renderModal(); render(); buzz();
+    toast(dup ? 'Opgeslagen – let op: rugnummer is dubbel' : 'Speler opgeslagen');
+  },
+  match(fd) {
+    const opp = String(fd.get('opponent') || '').trim();
+    if (!opp) { toast('Vul de tegenstander in'); return; }
+    const data = {opponent: opp, date: fd.get('date') || todayStr(), time: fd.get('time') || '', homeAway: fd.get('homeAway') === 'uit' ? 'uit' : 'thuis',
+      location: String(fd.get('location') || '').trim(), competition: String(fd.get('competition') || '').trim(), notes: String(fd.get('notes') || '').trim()};
+    let m = ui.modal.id ? state.matches.find((x) => x.id === ui.modal.id) : null;
+    if (m) {
+      const my = myScore(m), op = oppScore(m);
+      Object.assign(m, data); setScores(m, my, op);
+    } else {
+      m = Object.assign({id: uid(), homeScore: 0, awayScore: 0, status: 'gepland'}, data);
+      state.matches.push(m);
+      state.lineups[m.id] = clone(getLineup('default'));
+    }
+    save(); const id = m.id; ui.modal = null; renderModal();
+    if (ui.sub && ui.sub.type === 'match') render(); else goSub('match', id);
+    toast('Wedstrijd opgeslagen');
+  },
+  goal(fd) {
+    const scorer = fd.get('scorer'); if (!scorer) { toast('Kies een doelpuntenmaker'); return; }
+    const assist = fd.get('assist') || null;
+    state.events.push({id: uid(), matchId: ui.modal.matchId, type: 'goal', playerId: scorer, assistPlayerId: assist && assist !== scorer ? assist : null, minute: clampMin(fd.get('minute'))});
+    finishEvent();
+  },
+  card(fd) {
+    const p = fd.get('player'); if (!p) { toast('Kies een speler'); return; }
+    state.events.push({id: uid(), matchId: ui.modal.matchId, type: fd.get('kind') === 'redCard' ? 'redCard' : 'yellowCard', playerId: p, minute: clampMin(fd.get('minute'))});
+    finishEvent();
+  },
+  sub(fd) {
+    const out = fd.get('out'), inn = fd.get('in');
+    if (!out || !inn) { toast('Kies beide spelers'); return; }
+    if (out === inn) { toast('Kies twee verschillende spelers'); return; }
+    state.events.push({id: uid(), matchId: ui.modal.matchId, type: 'substitution', playerId: inn, outPlayerId: out, minute: clampMin(fd.get('minute'))});
+    finishEvent();
+  }
+};
+function clampMin(v) { const n = parseInt(v, 10); return isNaN(n) ? 1 : Math.max(1, Math.min(130, n)); }
+function finishEvent() {
+  const m = state.matches.find((x) => x.id === ui.modal.matchId);
+  if (m) autoMinutes(m, false);
+  save(); ui.modal = null; renderModal(); render(); buzz();
+}
+
+/* ---------- acties ---------- */
+function curMatch() { return ui.sub && ui.sub.type === 'match' ? state.matches.find((m) => m.id === ui.sub.id) : null; }
+
+async function exportData() {
+  const payload = JSON.stringify({app: 'TeamSheet', version: 1, exportedAt: new Date().toISOString(), data: state}, null, 1);
+  const name = 'teamsheet-backup-' + todayStr() + '.json';
+  try {
+    const file = new File([payload], name, {type: 'application/json'});
+    if (navigator.canShare && navigator.canShare({files: [file]})) {
+      await navigator.share({files: [file], title: 'TeamSheet backup'});
+      return;
+    }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  const url = URL.createObjectURL(new Blob([payload], {type: 'application/json'}));
+  const a = document.createElement('a'); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast('Backup gemaakt');
+}
+async function importData(file) {
+  try {
+    const parsed = JSON.parse(await file.text());
+    const data = parsed && parsed.data ? parsed.data : parsed;
+    if (!data || !Array.isArray(data.players) || !Array.isArray(data.matches)) throw new Error('ongeldig');
+    const ok = await askConfirm('Gegevens importeren?', 'Je huidige gegevens worden vervangen door de backup (' + data.players.length + ' spelers, ' + data.matches.length + ' wedstrijden).', 'Importeren');
+    if (!ok) return;
+    state = normalize(data); ui.lineupKey = 'default'; ui.sel = null;
+    await persist(); render(); toast('Backup teruggezet');
+  } catch (e) { toast('Dit bestand is geen geldige TeamSheet-backup'); }
+}
+
+function act(name, d) {
+  const m = curMatch();
+  switch (name) {
+    case 'settings': goSub('settings'); break;
+    case 'back': back(); break;
+    case 'addPlayer': openModal('player'); break;
+    case 'editPlayer': openModal('player', {id: d.id}); break;
+    case 'player': goSub('player', d.id); break;
+    case 'sort': ui.sort = d.v; render(); break;
+    case 'statSort': ui.statSort = d.v; render(); break;
+    case 'clearPhoto': formTmp.photo = null; $('#photoPrev').innerHTML = avatar(null, 72); break;
+    case 'deletePlayer': {
+      const p = P(d.id); if (!p) break;
+      askConfirm('Speler verwijderen?', fullName(p) + ' wordt ook uit opstellingen en statistieken verwijderd.', 'Ja, verwijderen').then((ok) => {
+        if (!ok) return;
+        removePlayer(d.id); save(); ui.modal = null; renderModal();
+        if (ui.sub && ui.sub.type === 'player') ui.sub = null;
+        ui.sel = null; resetScroll = true; render(); toast('Speler verwijderd');
+      });
+      break;
+    }
+    case 'addMatch': openModal('match'); break;
+    case 'editMatch': openModal('match', {id: d.id}); break;
+    case 'match': goSub('match', d.id); break;
+    case 'deleteMatch': {
+      askConfirm('Wedstrijd verwijderen?', 'Alle gegevens van deze wedstrijd worden verwijderd.', 'Ja, verwijderen').then((ok) => {
+        if (!ok) return;
+        removeMatch(d.id); save(); ui.modal = null; renderModal(); ui.sub = null; resetScroll = true; render(); toast('Wedstrijd verwijderd');
+      });
+      break;
+    }
+    case 'score': if (m) { const w = d.who === 'my'; setScores(m, myScore(m) + (w ? +d.d : 0), oppScore(m) + (w ? 0 : +d.d)); save(); render(); } break;
+    case 'takeGoals': if (m) { setScores(m, state.events.filter((e) => e.matchId === m.id && e.type === 'goal').length, oppScore(m)); save(); render(); } break;
+    case 'openLineup': ui.lineupKey = d.id; ui.tab = 'lineup'; ui.sub = null; ui.sel = null; resetScroll = true; render(); break;
+    case 'addGoal': if (m) openModal('goal', {matchId: m.id}); break;
+    case 'addCard': if (m) openModal('card', {matchId: m.id}); break;
+    case 'addSub': if (m) openModal('sub', {matchId: m.id}); break;
+    case 'delEvent': state.events = state.events.filter((e) => e.id !== d.id); save(); render(); break;
+    case 'min': if (m) { const mm = state.minutes[m.id] || (state.minutes[m.id] = {}); mm[d.id] = Math.max(0, Math.min(130, (mm[d.id] || 0) + (+d.d))); save(); render(); } break;
+    case 'autoMinutes': if (m) { autoMinutes(m, true); save(); render(); toast('Minuten ingevuld'); } break;
+    case 'selClear': ui.sel = null; render(); break;
+    case 'selBench': if (ui.sel) { lineupBench(curLineup(), ui.sel); ui.sel = null; save(); render(); } break;
+    case 'selRemove': if (ui.sel) { lineupRemove(curLineup(), ui.sel); ui.sel = null; save(); render(); } break;
+    case 'pickPlayer': lineupMove(curLineup(), d.id, +d.slot); save(); ui.modal = null; renderModal(); render(); buzz(); break;
+    case 'pickBenchOpen': openModal('pickBench'); break;
+    case 'pickBench': lineupBench(curLineup(), d.id); save(); ui.modal = null; renderModal(); render(); break;
+    case 'closeModal': closeModal(); break;
+    case 'confirmYes': { const r = confirmResolve; confirmResolve = null; ui.modal = null; renderModal(); if (r) r(true); break; }
+    case 'installNever': try { localStorage.setItem('ts_install_never', '1'); } catch (e) { /* negeer */ } closeModal(); break;
+    case 'removeLogo': state.team.logo = null; save(); render(); break;
+    case 'export': exportData(); break;
+    case 'wipe':
+      askConfirm('Alle gegevens verwijderen?', 'Spelers, wedstrijden, opstellingen en statistieken worden definitief gewist. Maak eerst een backup.', 'Alles verwijderen').then(async (ok) => {
+        if (!ok) return;
+        state = defaultState(); ui.lineupKey = 'default'; ui.sel = null; ui.sub = null; ui.tab = 'team';
+        try { localStorage.removeItem('teamsheet_state'); } catch (e) { /* negeer */ }
+        await persist(); resetScroll = true; render(); toast('Alle gegevens verwijderd');
+      });
+      break;
+    default: break;
+  }
+}
+
+/* ---------- events (delegatie) ---------- */
+let suppressClick = false;
+document.addEventListener('click', (e) => {
+  if (suppressClick) { e.preventDefault(); e.stopPropagation(); return; }
+  const t = e.target;
+  if (t.matches && t.matches('[data-backdrop]')) { closeModal(); return; }
+  const tab = t.closest('[data-tab]');
+  if (tab) { goTab(tab.dataset.tab); return; }
+  const a = t.closest('[data-act]');
+  if (a) { act(a.dataset.act, a.dataset); return; }
+  const main = $('#main');
+  const slot = t.closest('[data-slot]');
+  if (slot && main.contains(slot)) { onSlot(+slot.dataset.slot); return; }
+  const chip = t.closest('[data-chip]');
+  if (chip && main.contains(chip)) { onChip(chip.dataset.chip); return; }
+  const drop = t.closest('[data-drop="bench"],[data-drop="pool"]');
+  if (drop && ui.sel && main.contains(drop)) {
+    const l = curLineup();
+    if (drop.dataset.drop === 'bench') lineupBench(l, ui.sel); else lineupRemove(l, ui.sel);
+    ui.sel = null; save(); render();
+  }
+});
+
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'q') { ui.q = e.target.value; const el = $('#playerList'); if (el) el.innerHTML = playerListHTML(); }
+});
+
+document.addEventListener('change', async (e) => {
+  const t = e.target; const k = t.dataset && t.dataset.change; if (!k) return;
+  const m = curMatch();
+  if (k === 'lineupKey') { ui.lineupKey = t.value; ui.sel = null; render(); }
+  else if (k === 'formation') { curLineup().formation = t.value; save(); render(); }
+  else if (k === 'status' && m) { m.status = t.value === 'afgerond' ? 'afgerond' : 'gepland'; if (m.status === 'afgerond') autoMinutes(m, false); save(); render(); }
+  else if (k === 'teamName') { state.team.name = t.value.trim() || 'Mijn team'; save(); }
+  else if (k === 'defaultFormation') { state.settings.defaultFormation = t.value; state.lineups.default.formation = t.value; save(); toast('Standaardformatie ingesteld'); }
+  else if (k === 'logo' && t.files && t.files[0]) {
+    try { state.team.logo = await resizeImage(t.files[0], 256, 'contain', 'image/png'); save(); render(); } catch (err) { toast('Logo kon niet worden geladen'); }
+    t.value = '';
+  } else if (k === 'photo' && t.files && t.files[0]) {
+    try { formTmp.photo = await resizeImage(t.files[0], 400, 'cover', 'image/jpeg'); $('#photoPrev').innerHTML = avatar({firstName: 'x', photo: formTmp.photo}, 72); } catch (err) { toast('Foto kon niet worden geladen'); }
+    t.value = '';
+  } else if (k === 'import' && t.files && t.files[0]) {
+    const f = t.files[0]; t.value = ''; importData(f);
+  }
+});
+
+document.addEventListener('submit', (e) => {
+  const f = e.target.dataset && e.target.dataset.form; if (!f) return;
+  e.preventDefault();
+  if (forms[f]) forms[f](new FormData(e.target));
+});
+
+/* ---------- touch/pointer slepen ---------- */
+let drag = null;
+document.addEventListener('pointerdown', (e) => {
+  if (ui.tab !== 'lineup' || ui.sub || ui.modal) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const el = e.target.closest('[data-drag]');
+  if (!el) return;
+  drag = {pid: el.dataset.drag, sx: e.clientX, sy: e.clientY, started: false, ghost: null, el, id: e.pointerId, over: null};
+});
+document.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (!drag.started) {
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 10) return;
+    drag.started = true;
+    const p = P(drag.pid);
+    const g = document.createElement('div');
+    g.className = 'dragghost'; g.innerHTML = chipHTML(p, false, false);
+    document.body.appendChild(g); drag.ghost = g; drag.el.classList.add('dragging');
+    buzz(8);
+  }
+  e.preventDefault();
+  drag.ghost.style.left = e.clientX + 'px'; drag.ghost.style.top = e.clientY + 'px';
+  const t = document.elementFromPoint(e.clientX, e.clientY);
+  const over = t ? t.closest('[data-drop="slot"],[data-drop="bench"],[data-drop="pool"]') : null;
+  if (over !== drag.over) {
+    if (drag.over) drag.over.classList.remove('droptarget');
+    if (over) over.classList.add('droptarget');
+    drag.over = over;
+  }
+}, {passive: false});
+function endDrag(drop) {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.ghost) d.ghost.remove();
+  if (d.over) d.over.classList.remove('droptarget');
+  d.el.classList.remove('dragging');
+  if (!d.started) return;
+  suppressClick = true; setTimeout(() => { suppressClick = false; }, 80);
+  if (drop && d.over) {
+    const l = curLineup(); const kind = d.over.dataset.drop;
+    if (kind === 'slot') lineupMove(l, d.pid, +d.over.dataset.slot);
+    else if (kind === 'bench') lineupBench(l, d.pid);
+    else lineupRemove(l, d.pid);
+    ui.sel = null; save(); buzz(); render();
+  }
+}
+document.addEventListener('pointerup', (e) => { if (drag && e.pointerId === drag.id) endDrag(true); });
+document.addEventListener('pointercancel', () => endDrag(false));
+document.addEventListener('contextmenu', (e) => { if (e.target.closest('[data-drag]')) e.preventDefault(); });
+
+/* ---------- opstarten ---------- */
+window.addEventListener('pagehide', persist);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persist(); });
+
+(async function init() {
+  state = await loadState();
+  render();
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* negeer */ }
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+  }
+  let never = false;
+  try { never = localStorage.getItem('ts_install_never') === '1'; } catch (e) { /* negeer */ }
+  if (!isStandalone() && !never) setTimeout(() => { if (!ui.modal) openModal('install'); }, 700);
+})();
