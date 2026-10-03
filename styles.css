@@ -123,7 +123,7 @@ img.avatar{display:block}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 
 /* Pitch */
-.pitch{position:relative;width:100%;max-width:430px;margin:0 auto;aspect-ratio:68/105;border-radius:20px;overflow:hidden;
+.pitch{position:relative;width:100%;max-width:520px;margin:0 auto;aspect-ratio:68/105;border-radius:20px;overflow:hidden;
   container-type:inline-size;--cs:11.4cqw;
   background:repeating-linear-gradient(to bottom,#2d8a47 0,#2d8a47 10%,#257a3d 10%,#257a3d 20%);
   box-shadow:0 8px 22px rgba(11,61,36,.3);border:3px solid var(--green)}
@@ -196,3 +196,13 @@ img.avatar{display:block}
 .inst li{margin:8px 0;font-size:15px;line-height:1.35}
 .hr{height:1px;background:var(--line);margin:14px 0}
 .logo-prev{width:72px;height:72px;border-radius:18px;object-fit:cover;background:var(--bg);display:grid;place-items:center;color:var(--muted);font-size:12px;flex:none}
+
+/* v1.1 – vrij slepen, aanvoerder, opgeslagen opstellingen */
+.slot{z-index:1;-webkit-user-select:none;user-select:none}
+.slot.moving{z-index:6}
+.slot.moving .chip{transform:scale(1.15);filter:drop-shadow(0 8px 8px rgba(0,0,0,.4))}
+.chip .num{position:relative}
+.chip .cap{position:absolute;top:-5px;right:-7px;width:calc(var(--cs)*.38);height:calc(var(--cs)*.38);border-radius:50%;background:var(--yellow);color:#3a2a00;font-style:normal;font-weight:900;font-size:calc(var(--cs)*.26);display:grid;place-items:center;border:1.5px solid #fff;line-height:1}
+.pitch.droptarget{outline:3px dashed var(--yellow);outline-offset:-6px}
+.pitch{touch-action:pan-y}
+.list>.btn{width:100%}

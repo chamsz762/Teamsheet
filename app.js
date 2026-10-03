@@ -1,7 +1,8 @@
 'use strict';
 /* TeamSheet – lokale voetbal-PWA. Geen account, geen backend. */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
+const SAVED_KEY = 'teamsheet_saved_lineups_v1';
 const POSITIONS = ['Keeper','Centrale verdediger','Linksback','Rechtsback','Middenvelder','Linksmidden','Rechtsmidden','Aanvallende middenvelder','Linksbuiten','Rechtsbuiten','Spits'];
 const POS_ABBR = {'Keeper':'K','Centrale verdediger':'CV','Linksback':'LV','Rechtsback':'RV','Middenvelder':'M','Linksmidden':'LM','Rechtsmidden':'RM','Aanvallende middenvelder':'AM','Linksbuiten':'LB','Rechtsbuiten':'RB','Spits':'SP'};
 const FORMATIONS = {'4-3-3':[1,4,3,3],'4-4-2':[1,4,4,2],'4-2-3-1':[1,4,2,3,1],'3-5-2':[1,3,5,2],'4-3-2-1':[1,4,3,2,1]};
@@ -83,7 +84,7 @@ async function idbSet(key, val) {
   });
 }
 
-function newLineup(f) { return {formation: FORMATIONS[f] ? f : '4-3-3', positions: Array(11).fill(null), bench: []}; }
+function newLineup(f) { return {formation: FORMATIONS[f] ? f : '4-3-3', positions: Array(11).fill(null), bench: [], coords: Array(11).fill(null), layouts: {}, captain: null}; }
 function defaultState() {
   return {
     version: 1,
@@ -109,6 +110,10 @@ function normalize(s) {
     const pos = Array.isArray(l.positions) ? l.positions : [];
     l.positions = Array.from({length: 11}, (_, i) => pos[i] || null);
     l.bench = Array.isArray(l.bench) ? l.bench : [];
+    const cs = Array.isArray(l.coords) ? l.coords : [];
+    l.coords = Array.from({length: 11}, (_, i) => validXY(cs[i]));
+    if (!l.layouts || typeof l.layouts !== 'object') l.layouts = {};
+    if (!l.captain) l.captain = null;
     o.lineups[k] = l;
   });
   return o;
@@ -169,7 +174,9 @@ function formationSlots(name) {
 
 function lineupRemove(l, pid) {
   l.positions = l.positions.map((x) => (x === pid ? null : x));
+  l.coords = l.coords.map((c, i) => (l.positions[i] ? c : null));
   l.bench = l.bench.filter((x) => x !== pid);
+  if (l.captain === pid) l.captain = null;
 }
 function lineupBench(l, pid) { lineupRemove(l, pid); l.bench.push(pid); }
 function lineupMove(l, pid, slot) {
@@ -186,6 +193,8 @@ function lineupMove(l, pid, slot) {
   if (occ) {
     if (from && from.t === 'slot') l.positions[from.i] = occ;
     else if (from && from.t === 'bench') l.bench.splice(Math.min(from.i, l.bench.length), 0, occ);
+  } else if (from && from.t === 'slot') {
+    l.coords[from.i] = null;
   }
 }
 function getLineup(key) {
@@ -194,6 +203,8 @@ function getLineup(key) {
   const ids = new Set(state.players.map((p) => p.id));
   l.positions = l.positions.map((x) => (x && ids.has(x) ? x : null));
   l.bench = l.bench.filter((x) => ids.has(x));
+  l.coords = l.coords.map((c, i) => (l.positions[i] ? c : null));
+  if (l.captain && !l.positions.includes(l.captain) && !l.bench.includes(l.captain)) l.captain = null;
   return l;
 }
 function curLineup() {
@@ -202,7 +213,96 @@ function curLineup() {
   return getLineup(key);
 }
 
+/* vrije posities: alle coördinaten zijn percentages van het veld (0–100) */
+const PITCH_RATIO = 105 / 68; // veldhoogte / veldbreedte
+function validXY(c) {
+  if (!c || !isFinite(c.x) || !isFinite(c.y)) return null;
+  return {x: Math.max(0, Math.min(100, +c.x)), y: Math.max(0, Math.min(100, +c.y))};
+}
+function clampXY(x, y) {
+  return {x: Math.round(Math.max(7, Math.min(93, x)) * 10) / 10, y: Math.round(Math.max(6, Math.min(94, y)) * 10) / 10};
+}
+function slotXY(l, i) { return l.coords[i] || formationSlots(l.formation)[i]; }
+function setFormation(l, f) {
+  if (!FORMATIONS[f] || f === l.formation) return;
+  l.layouts = l.layouts || {};
+  l.layouts[l.formation] = l.coords.slice();
+  l.formation = f;
+  const saved = l.layouts[f];
+  l.coords = Array.from({length: 11}, (_, i) => ((saved && saved[i] && l.positions[i]) ? saved[i] : null));
+}
+/* plaatst een speler van de bank/beschikbaar op een vrij punt op het veld */
+function placeFree(l, pid, x, y) {
+  const p = clampXY(x, y);
+  let hit = -1, best = 8;
+  l.positions.forEach((id, i) => {
+    if (!id) return;
+    const c = slotXY(l, i);
+    const d = Math.hypot(c.x - p.x, (c.y - p.y) * PITCH_RATIO);
+    if (d < best) { best = d; hit = i; }
+  });
+  if (hit >= 0) { lineupMove(l, pid, hit); return true; }
+  const defs = formationSlots(l.formation);
+  let empty = -1, bd = 1e9;
+  l.positions.forEach((id, i) => {
+    if (id) return;
+    const d = Math.hypot(defs[i].x - p.x, (defs[i].y - p.y) * PITCH_RATIO);
+    if (d < bd) { bd = d; empty = i; }
+  });
+  if (empty < 0) return false;
+  lineupMove(l, pid, empty);
+  l.coords[empty] = bd < 6 ? null : p;
+  return true;
+}
+
+/* ---------- opgeslagen opstellingen (localStorage, eigen sleutel) ---------- */
+let savedLineups = [];
+function validSaved(s) { return !!s && typeof s.id === 'string' && typeof s.name === 'string' && Array.isArray(s.players); }
+function loadSaved() {
+  try {
+    const a = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]');
+    return Array.isArray(a) ? a.filter(validSaved) : [];
+  } catch (e) { return []; }
+}
+function writeSaved(list) {
+  try { localStorage.setItem(SAVED_KEY, JSON.stringify(list)); return true; }
+  catch (e) { toast('Opslaan van opstelling mislukt'); return false; }
+}
+function snapshotLineup(l, name, id) {
+  return {
+    id: id || uid(), name, formation: l.formation, captainId: l.captain || null,
+    players: l.positions.map((pid, i) => {
+      if (!pid) return null;
+      const c = slotXY(l, i);
+      return {playerId: pid, slot: i, x: Math.round(c.x * 10) / 10, y: Math.round(c.y * 10) / 10};
+    }).filter(Boolean),
+    bench: l.bench.slice(), layouts: clone(l.layouts || {}), savedAt: new Date().toISOString()
+  };
+}
+function applySaved(l, sv) {
+  const ids = new Set(state.players.map((p) => p.id));
+  let missing = 0;
+  l.formation = FORMATIONS[sv.formation] ? sv.formation : '4-3-3';
+  l.positions = Array(11).fill(null);
+  l.coords = Array(11).fill(null);
+  (sv.players || []).forEach((e) => {
+    if (!ids.has(e.playerId)) { missing++; return; }
+    const i = +e.slot;
+    if (i >= 0 && i < 11 && !l.positions[i]) { l.positions[i] = e.playerId; l.coords[i] = validXY(e); }
+  });
+  l.bench = (sv.bench || []).filter((id) => ids.has(id) && !l.positions.includes(id));
+  l.captain = (sv.captainId && (l.positions.includes(sv.captainId) || l.bench.includes(sv.captainId))) ? sv.captainId : null;
+  l.layouts = clone(sv.layouts || {});
+  return missing;
+}
+
 function removePlayer(id) {
+  savedLineups.forEach((sv) => {
+    sv.players = (sv.players || []).filter((e) => e.playerId !== id);
+    sv.bench = (sv.bench || []).filter((x) => x !== id);
+    if (sv.captainId === id) sv.captainId = null;
+  });
+  writeSaved(savedLineups);
   state.players = state.players.filter((p) => p.id !== id);
   Object.values(state.lineups).forEach((l) => lineupRemove(l, id));
   state.events = state.events.filter((e) => e.playerId !== id && e.outPlayerId !== id);
@@ -302,7 +402,7 @@ function resizeImage(file, size, mode, type) {
 }
 
 /* ---------- UI-state ---------- */
-const ui = {tab: 'team', sub: null, modal: null, sel: null, lineupKey: 'default', sort: 'nummer', q: '', statSort: 'goals'};
+const ui = {tab: 'team', sub: null, modal: null, sel: null, lineupKey: 'default', openedSaved: null, sort: 'nummer', q: '', statSort: 'goals'};
 let resetScroll = false;
 let formTmp = {};
 let confirmResolve = null;
@@ -354,8 +454,9 @@ function avatar(p, size) {
   const ini = p ? ((p.firstName || '?')[0] + ((p.lastName || '')[0] || '')).toUpperCase() : '?';
   return '<div class="avatar" style="' + s + '">' + esc(ini) + '</div>';
 }
+function isCaptain(id) { const l0 = state.lineups[ui.lineupKey] || state.lineups.default; return !!l0 && l0.captain === id; }
 function chipHTML(p, selected, drag) {
-  return '<div class="chip' + (selected ? ' sel' : '') + '" data-chip="' + p.id + '"' + (drag ? ' data-drag="' + p.id + '"' : '') + '><div class="num">' + esc(p.number) + '</div><div class="nm">' + esc(shortName(p)) + '</div></div>';
+  return '<div class="chip' + (selected ? ' sel' : '') + '" data-chip="' + p.id + '"' + (drag ? ' data-drag="' + p.id + '"' : '') + '><div class="num">' + esc(p.number) + (isCaptain(p.id) ? '<i class="cap">C</i>' : '') + '</div><div class="nm">' + esc(shortName(p)) + '</div></div>';
 }
 function statTiles(s, hl, four) {
   const t = [['matches', 'Wedstrijden', s.matches], ['starts', 'Basis', s.starts], ['subs', 'Ingevallen', s.subs], ['goals', 'Doelpunten', s.goals], ['assists', 'Assists', s.assists], ['yellow', 'Gele kaarten', s.yellow], ['red', 'Rode kaarten', s.red], ['minutes', 'Minuten', s.minutes]];
@@ -417,10 +518,11 @@ function pitchHTML(l) {
     '<rect x="24.85" y="2" width="18.3" height="5.5"/><rect x="24.85" y="97.5" width="18.3" height="5.5"/>' +
     '<circle cx="34" cy="13" r=".7" fill="#fff"/><circle cx="34" cy="92" r=".7" fill="#fff"/>' +
     '<path d="M26.7 18.5a9.15 9.15 0 0 0 14.6 0M26.7 86.5a9.15 9.15 0 0 1 14.6 0"/></svg>';
-  return '<div class="pitch">' + lines + slots.map((s, i) => {
+  return '<div class="pitch" data-drop="pitch">' + lines + slots.map((s, i) => {
     const p = P(l.positions[i]);
+    const c = p ? slotXY(l, i) : s;
     const inner = p ? chipHTML(p, ui.sel === p.id, true) : '<div class="ghostchip">+</div><span class="role">' + s.role + '</span>';
-    return '<div class="slot' + (p && ui.sel === p.id ? ' sel' : '') + '" data-slot="' + i + '" data-drop="slot" style="left:' + s.x + '%;top:' + s.y + '%">' + inner + '</div>';
+    return '<div class="slot' + (p && ui.sel === p.id ? ' sel' : '') + '" data-slot="' + i + '" style="left:' + c.x + '%;top:' + c.y + '%">' + inner + '</div>';
   }).join('') + '</div>';
 }
 function lineupHTML() {
@@ -433,22 +535,31 @@ function lineupHTML() {
     state.matches.slice().sort((a, b) => matchDate(b) - matchDate(a)).map((m) => '<option value="' + m.id + '"' + (ui.lineupKey === m.id ? ' selected' : '') + '>vs ' + esc(m.opponent) + ' · ' + fmtDate(m, {day: 'numeric', month: 'short'}) + '</option>').join('');
   const fOpts = Object.keys(FORMATIONS).map((f) => '<option' + (l.formation === f ? ' selected' : '') + '>' + f + '</option>').join('');
   const strip = (arr, drop, hint) => '<div class="strip" data-drop="' + drop + '">' + (arr.length ? arr.map((p) => chipHTML(p, ui.sel === p.id, true)).join('') : '<span class="hint">' + hint + '</span>') + '</div>';
+  const opened = (ui.openedSaved && ui.openedSaved.key === ui.lineupKey) ? savedLineups.find((x) => x.id === ui.openedSaved.id) : null;
   let selbar = '';
   if (ui.sel && P(ui.sel)) {
     const inL = used.has(ui.sel);
     selbar = '<div class="selbar"><b>Geselecteerd: ' + esc(P(ui.sel).number) + ' ' + esc(fullName(P(ui.sel))) + ' — tik op een positie</b>' +
-      '<button data-act="selBench">Naar bank</button>' + (inL ? '<button data-act="selRemove">Uit opstelling</button>' : '') + '<button class="x" data-act="selClear">Annuleer</button></div>';
+      '<button data-act="selBench">Naar bank</button>' +
+      (inL ? '<button data-act="selRemove">Uit opstelling</button><button data-act="selCaptain">' + (l.captain === ui.sel ? 'Geen aanvoerder' : 'Aanvoerder') + '</button>' : '') +
+      '<button class="x" data-act="selClear">Annuleer</button></div>';
   }
   return '<div class="page"><h1>Opstelling</h1>' +
+    (opened ? '<p class="sub">Geopend: <b>' + esc(opened.name) + '</b> · ' + esc(opened.formation) + '</p>' : '') +
     '<label class="field"><span>Opstelling voor</span><select data-change="lineupKey">' + keyOpts + '</select></label>' +
     '<label class="field" style="margin-bottom:14px"><span>Formatie</span><select data-change="formation">' + fOpts + '</select></label>' +
     pitchHTML(l) +
-    '<p class="sub" style="text-align:center;margin-top:10px"><b>' + starters + '/11</b> basis · <b>' + bench.length + '</b> op de bank</p>' +
+    '<p class="sub" style="text-align:center;margin-top:10px"><b>' + starters + '/11</b> basis · <b>' + bench.length + '</b> op de bank · sleep spelers vrij over het veld</p>' +
+    '<div class="list" style="margin-top:14px">' +
+    (opened ? '<button class="btn" data-act="updateLineup">Opstelling bijwerken</button>' : '') +
+    '<button class="btn' + (opened ? ' sec' : '') + '" data-act="saveLineup">Opstelling opslaan</button>' +
+    '<button class="btn sec" data-act="myLineups">Mijn opstellingen' + (savedLineups.length ? ' (' + savedLineups.length + ')' : '') + '</button>' +
+    '<button class="btn ghost" data-act="newLineup">+ Nieuwe opstelling</button></div>' +
     '<section class="blk"><div class="between"><h3>Wisselspelers<span class="count">' + bench.length + '</span></h3><button class="btn small ghost" data-act="pickBenchOpen">' + ic('plus', 'sm') + ' Toevoegen</button></div>' +
     strip(bench, 'bench', 'Tik of sleep hier spelers naartoe') + '</section>' +
     '<section class="blk"><div class="between"><h3>Beschikbaar<span class="count">' + pool.length + '</span></h3></div>' +
     strip(pool, 'pool', state.players.length ? 'Alle spelers staan in de opstelling' : 'Voeg eerst spelers toe in Team') + '</section>' +
-    '<p class="sub" style="text-align:center;margin-top:16px">Tik op een speler en daarna op een positie, of sleep een speler met je vinger. Een bezette positie wisselt automatisch.</p>' +
+    '<p class="sub" style="text-align:center;margin-top:16px">Houd een speler vast en sleep hem naar elke gewenste plek op het veld. Of tik op een speler en daarna op een positie. Sleep je een speler op een andere speler, dan wisselen ze.</p>' +
     selbar + '</div>';
 }
 function onSlot(i) {
@@ -614,6 +725,24 @@ function modalHTML(m) {
     return '<h2>Wisselspeler toevoegen</h2><div class="picklist" style="margin-top:8px">' + (players.length ? players.map((p) =>
       '<button data-act="pickBench" data-id="' + p.id + '">' + avatar(p, 40) + '<div><b>' + esc(p.number + ' · ' + fullName(p)) + '</b><div class="muted" style="font-size:13px">' + esc(p.position) + '</div></div></button>').join('') : '<p class="sub" style="padding:16px 0">Geen beschikbare spelers.</p>') + '</div><div class="actions"><button class="btn sec" data-act="closeModal">Sluiten</button></div>';
   }
+  if (m.type === 'saveLineup') {
+    return '<form data-form="saveLineup" autocomplete="off"><h2>Opstelling opslaan</h2><p class="sub">' + esc(curLineup().formation) + ' · ' + curLineup().positions.filter(Boolean).length + ' spelers op het veld</p>' +
+      '<label class="field"><span>Naam van de opstelling</span><input name="name" placeholder="Bijv. Competitie – zondag" maxlength="40" required autocapitalize="sentences"></label>' + formActions() + '</form>';
+  }
+  if (m.type === 'newLineup') {
+    return '<form data-form="newLineup"><h2>Nieuwe opstelling</h2><p class="sub">Kies een formatie. Je opgeslagen opstellingen blijven bewaard.</p>' +
+      '<label class="field"><span>Formatie</span><select name="formation">' + Object.keys(FORMATIONS).map((f) => '<option' + (state.settings.defaultFormation === f ? ' selected' : '') + '>' + f + '</option>').join('') + '</select></label>' + formActions('Maken') + '</form>';
+  }
+  if (m.type === 'myLineups') {
+    const sorted = savedLineups.slice().sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
+    return '<h2>Mijn opstellingen</h2>' + (sorted.length ? '<div class="list" style="margin-top:12px">' + sorted.map((sv) =>
+      '<div class="card"><div class="between"><div style="min-width:0"><b style="font-size:17px">' + esc(sv.name) + '</b><div class="muted" style="font-size:13px;margin-top:2px">' + esc(sv.formation) + ' · ' + sv.players.length + ' spelers · ' +
+      new Date(sv.savedAt).toLocaleDateString('nl-NL', {day: 'numeric', month: 'short', year: 'numeric'}) + '</div></div></div>' +
+      '<div class="actions" style="margin-top:12px"><button class="btn small" style="flex:1" data-act="openSaved" data-id="' + sv.id + '">Openen</button>' +
+      '<button class="btn small danger" style="flex:1" data-act="deleteSaved" data-id="' + sv.id + '">Verwijderen</button></div></div>').join('') + '</div>'
+      : '<p class="sub" style="padding:18px 0">Je hebt nog geen opgeslagen opstellingen. Maak een opstelling en tik op “Opstelling opslaan”.</p>') +
+      '<div class="actions"><button class="btn sec" data-act="closeModal">Sluiten</button></div>';
+  }
   if (m.type === 'player') {
     const p = m.id ? P(m.id) : null;
     formTmp = {photo: p ? p.photo : null};
@@ -658,6 +787,32 @@ function modalHTML(m) {
 
 /* formulieren */
 const forms = {
+  saveLineup(fd) {
+    const name = String(fd.get('name') || '').trim();
+    if (!name) { toast('Geef de opstelling een naam'); return; }
+    const l = curLineup();
+    const existing = savedLineups.find((x) => x.name.toLowerCase() === name.toLowerCase());
+    const doSave = () => {
+      const snap = snapshotLineup(l, existing ? existing.name : name, existing ? existing.id : null);
+      if (existing) savedLineups[savedLineups.indexOf(existing)] = snap; else savedLineups.push(snap);
+      if (!writeSaved(savedLineups)) return;
+      ui.openedSaved = {id: snap.id, key: ui.lineupKey};
+      ui.modal = null; renderModal(); render(); buzz();
+      toast(existing ? 'Opstelling overschreven' : 'Opstelling opgeslagen');
+    };
+    if (existing) {
+      askConfirm('Naam bestaat al', 'Wil je de opstelling “' + existing.name + '” overschrijven?', 'Overschrijven').then((ok) => { if (ok) doSave(); else openModal('saveLineup'); });
+    } else doSave();
+  },
+  newLineup(fd) {
+    const l = curLineup();
+    const f = fd.get('formation');
+    l.formation = FORMATIONS[f] ? f : '4-3-3';
+    l.positions = Array(11).fill(null); l.coords = Array(11).fill(null);
+    l.bench = []; l.captain = null; l.layouts = {};
+    ui.openedSaved = null; ui.sel = null;
+    save(); ui.modal = null; renderModal(); render(); toast('Nieuwe opstelling gemaakt');
+  },
   player(fd) {
     const first = String(fd.get('firstName') || '').trim();
     const last = String(fd.get('lastName') || '').trim();
@@ -723,7 +878,7 @@ function finishEvent() {
 function curMatch() { return ui.sub && ui.sub.type === 'match' ? state.matches.find((m) => m.id === ui.sub.id) : null; }
 
 async function exportData() {
-  const payload = JSON.stringify({app: 'TeamSheet', version: 1, exportedAt: new Date().toISOString(), data: state}, null, 1);
+  const payload = JSON.stringify({app: 'TeamSheet', version: 1, exportedAt: new Date().toISOString(), data: state, savedLineups: savedLineups}, null, 1);
   const name = 'teamsheet-backup-' + todayStr() + '.json';
   try {
     const file = new File([payload], name, {type: 'application/json'});
@@ -745,7 +900,8 @@ async function importData(file) {
     if (!data || !Array.isArray(data.players) || !Array.isArray(data.matches)) throw new Error('ongeldig');
     const ok = await askConfirm('Gegevens importeren?', 'Je huidige gegevens worden vervangen door de backup (' + data.players.length + ' spelers, ' + data.matches.length + ' wedstrijden).', 'Importeren');
     if (!ok) return;
-    state = normalize(data); ui.lineupKey = 'default'; ui.sel = null;
+    state = normalize(data); ui.lineupKey = 'default'; ui.sel = null; ui.openedSaved = null;
+    if (Array.isArray(parsed.savedLineups)) { savedLineups = parsed.savedLineups.filter(validSaved); writeSaved(savedLineups); }
     await persist(); render(); toast('Backup teruggezet');
   } catch (e) { toast('Dit bestand is geen geldige TeamSheet-backup'); }
 }
@@ -796,6 +952,52 @@ function act(name, d) {
     case 'pickPlayer': lineupMove(curLineup(), d.id, +d.slot); save(); ui.modal = null; renderModal(); render(); buzz(); break;
     case 'pickBenchOpen': openModal('pickBench'); break;
     case 'pickBench': lineupBench(curLineup(), d.id); save(); ui.modal = null; renderModal(); render(); break;
+    case 'saveLineup': openModal('saveLineup'); break;
+    case 'myLineups': openModal('myLineups'); break;
+    case 'newLineup': {
+      const l = curLineup();
+      if (l.positions.some(Boolean) || l.bench.length) {
+        askConfirm('Nieuwe opstelling maken?', 'De huidige opstelling op het veld wordt leeggemaakt. Opgeslagen opstellingen blijven bewaard.', 'Ja, nieuwe opstelling').then((ok) => { if (ok) openModal('newLineup'); });
+      } else openModal('newLineup');
+      break;
+    }
+    case 'updateLineup': {
+      const o = ui.openedSaved;
+      const sv = o && savedLineups.find((x) => x.id === o.id);
+      if (!sv || o.key !== ui.lineupKey) { toast('Er is geen opgeslagen opstelling geopend'); break; }
+      savedLineups[savedLineups.indexOf(sv)] = snapshotLineup(curLineup(), sv.name, sv.id);
+      if (writeSaved(savedLineups)) { buzz(); toast('Opstelling bijgewerkt'); }
+      break;
+    }
+    case 'openSaved': {
+      const sv = savedLineups.find((x) => x.id === d.id); if (!sv) break;
+      const l = curLineup();
+      const go = () => {
+        const missing = applySaved(l, sv);
+        ui.openedSaved = {id: sv.id, key: ui.lineupKey}; ui.sel = null;
+        save(); ui.modal = null; renderModal(); render(); buzz();
+        toast(missing ? 'Geopend – ' + missing + ' speler(s) bestaan niet meer' : 'Opstelling geopend');
+      };
+      const sameOpen = ui.openedSaved && ui.openedSaved.id === sv.id && ui.openedSaved.key === ui.lineupKey;
+      if ((l.positions.some(Boolean) || l.bench.length) && !sameOpen) {
+        askConfirm('Opstelling openen?', 'De huidige opstelling op het veld wordt vervangen. Niet-opgeslagen wijzigingen gaan verloren.', 'Openen').then((ok) => { if (ok) go(); else openModal('myLineups'); });
+      } else go();
+      break;
+    }
+    case 'deleteSaved': {
+      const sv = savedLineups.find((x) => x.id === d.id); if (!sv) break;
+      askConfirm('Opstelling verwijderen?', 'Weet je zeker dat je deze opstelling wilt verwijderen?', 'Ja, verwijderen').then((ok) => {
+        if (ok) {
+          savedLineups = savedLineups.filter((x) => x.id !== sv.id);
+          writeSaved(savedLineups);
+          if (ui.openedSaved && ui.openedSaved.id === sv.id) ui.openedSaved = null;
+          render(); toast('Opstelling verwijderd');
+        }
+        openModal('myLineups');
+      });
+      break;
+    }
+    case 'selCaptain': if (ui.sel) { const l = curLineup(); l.captain = l.captain === ui.sel ? null : ui.sel; ui.sel = null; save(); render(); } break;
     case 'closeModal': closeModal(); break;
     case 'confirmYes': { const r = confirmResolve; confirmResolve = null; ui.modal = null; renderModal(); if (r) r(true); break; }
     case 'installNever': try { localStorage.setItem('ts_install_never', '1'); } catch (e) { /* negeer */ } closeModal(); break;
@@ -804,7 +1006,8 @@ function act(name, d) {
     case 'wipe':
       askConfirm('Alle gegevens verwijderen?', 'Spelers, wedstrijden, opstellingen en statistieken worden definitief gewist. Maak eerst een backup.', 'Alles verwijderen').then(async (ok) => {
         if (!ok) return;
-        state = defaultState(); ui.lineupKey = 'default'; ui.sel = null; ui.sub = null; ui.tab = 'team';
+        state = defaultState(); ui.lineupKey = 'default'; ui.sel = null; ui.sub = null; ui.tab = 'team'; ui.openedSaved = null; savedLineups = [];
+        try { localStorage.removeItem(SAVED_KEY); } catch (e) { /* negeer */ }
         try { localStorage.removeItem('teamsheet_state'); } catch (e) { /* negeer */ }
         await persist(); resetScroll = true; render(); toast('Alle gegevens verwijderd');
       });
@@ -844,10 +1047,10 @@ document.addEventListener('change', async (e) => {
   const t = e.target; const k = t.dataset && t.dataset.change; if (!k) return;
   const m = curMatch();
   if (k === 'lineupKey') { ui.lineupKey = t.value; ui.sel = null; render(); }
-  else if (k === 'formation') { curLineup().formation = t.value; save(); render(); }
+  else if (k === 'formation') { setFormation(curLineup(), t.value); save(); render(); }
   else if (k === 'status' && m) { m.status = t.value === 'afgerond' ? 'afgerond' : 'gepland'; if (m.status === 'afgerond') autoMinutes(m, false); save(); render(); }
   else if (k === 'teamName') { state.team.name = t.value.trim() || 'Mijn team'; save(); }
-  else if (k === 'defaultFormation') { state.settings.defaultFormation = t.value; state.lineups.default.formation = t.value; save(); toast('Standaardformatie ingesteld'); }
+  else if (k === 'defaultFormation') { state.settings.defaultFormation = t.value; setFormation(getLineup('default'), t.value); save(); toast('Standaardformatie ingesteld'); }
   else if (k === 'logo' && t.files && t.files[0]) {
     try { state.team.logo = await resizeImage(t.files[0], 256, 'contain', 'image/png'); save(); render(); } catch (err) { toast('Logo kon niet worden geladen'); }
     t.value = '';
@@ -866,54 +1069,81 @@ document.addEventListener('submit', (e) => {
 });
 
 /* ---------- touch/pointer slepen ---------- */
+/* Speler op het veld: beweegt vrij (percentages). Speler van bank/beschikbaar: spookbeeld, loslaten op veld/bank/beschikbaar. */
 let drag = null;
 document.addEventListener('pointerdown', (e) => {
   if (ui.tab !== 'lineup' || ui.sub || ui.modal) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   const el = e.target.closest('[data-drag]');
   if (!el) return;
-  drag = {pid: el.dataset.drag, sx: e.clientX, sy: e.clientY, started: false, ghost: null, el, id: e.pointerId, over: null};
+  const slotEl = el.closest('.slot');
+  const d = {pid: el.dataset.drag, sx: e.clientX, sy: e.clientY, started: false, ghost: null, el, id: e.pointerId, over: null, slotEl, pitch: null, offX: 0, offY: 0, pos: null};
+  if (slotEl) {
+    d.pitch = slotEl.parentElement;
+    const r = d.pitch.getBoundingClientRect();
+    d.offX = e.clientX - (r.left + parseFloat(slotEl.style.left) / 100 * r.width);
+    d.offY = e.clientY - (r.top + parseFloat(slotEl.style.top) / 100 * r.height);
+  }
+  drag = d;
 });
 document.addEventListener('pointermove', (e) => {
   if (!drag || e.pointerId !== drag.id) return;
-  if (!drag.started) {
-    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 10) return;
-    drag.started = true;
-    const p = P(drag.pid);
-    const g = document.createElement('div');
-    g.className = 'dragghost'; g.innerHTML = chipHTML(p, false, false);
-    document.body.appendChild(g); drag.ghost = g; drag.el.classList.add('dragging');
-    buzz(8);
+  const d = drag;
+  if (!d.started) {
+    if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < (d.slotEl ? 5 : 10)) return;
+    d.started = true; buzz(8);
+    if (d.slotEl) d.slotEl.classList.add('moving');
+    else {
+      const g = document.createElement('div');
+      g.className = 'dragghost'; g.innerHTML = chipHTML(P(d.pid), false, false);
+      document.body.appendChild(g); d.ghost = g; d.el.classList.add('dragging');
+    }
   }
   e.preventDefault();
-  drag.ghost.style.left = e.clientX + 'px'; drag.ghost.style.top = e.clientY + 'px';
+  if (d.slotEl) {
+    const r = d.pitch.getBoundingClientRect();
+    const p = clampXY((e.clientX - d.offX - r.left) / r.width * 100, (e.clientY - d.offY - r.top) / r.height * 100);
+    d.pos = p; d.slotEl.style.left = p.x + '%'; d.slotEl.style.top = p.y + '%';
+    return;
+  }
+  d.ghost.style.left = e.clientX + 'px'; d.ghost.style.top = e.clientY + 'px';
   const t = document.elementFromPoint(e.clientX, e.clientY);
-  const over = t ? t.closest('[data-drop="slot"],[data-drop="bench"],[data-drop="pool"]') : null;
-  if (over !== drag.over) {
-    if (drag.over) drag.over.classList.remove('droptarget');
+  const over = t ? t.closest('[data-drop="pitch"],[data-drop="bench"],[data-drop="pool"]') : null;
+  if (over !== d.over) {
+    if (d.over) d.over.classList.remove('droptarget');
     if (over) over.classList.add('droptarget');
-    drag.over = over;
+    d.over = over;
   }
 }, {passive: false});
-function endDrag(drop) {
+function endDrag(drop, e) {
   if (!drag) return;
   const d = drag; drag = null;
   if (d.ghost) d.ghost.remove();
   if (d.over) d.over.classList.remove('droptarget');
   d.el.classList.remove('dragging');
+  if (d.slotEl) d.slotEl.classList.remove('moving');
   if (!d.started) return;
   suppressClick = true; setTimeout(() => { suppressClick = false; }, 80);
-  if (drop && d.over) {
-    const l = curLineup(); const kind = d.over.dataset.drop;
-    if (kind === 'slot') lineupMove(l, d.pid, +d.over.dataset.slot);
-    else if (kind === 'bench') lineupBench(l, d.pid);
-    else lineupRemove(l, d.pid);
-    ui.sel = null; save(); buzz(); render();
+  const l = curLineup();
+  if (d.slotEl) {
+    const i = +d.slotEl.dataset.slot;
+    if (drop && d.pos && l.positions[i] === d.pid) { l.coords[i] = d.pos; save(); buzz(); }
+    render(); return;
   }
+  if (drop && d.over) {
+    const kind = d.over.dataset.drop;
+    if (kind === 'pitch') {
+      const r = d.over.getBoundingClientRect();
+      if (!placeFree(l, d.pid, (e.clientX - r.left) / r.width * 100, (e.clientY - r.top) / r.height * 100)) toast('Het veld is vol – sleep op een speler om te wisselen');
+    } else if (kind === 'bench') lineupBench(l, d.pid);
+    else lineupRemove(l, d.pid);
+    ui.sel = null; save(); buzz();
+  }
+  render();
 }
-document.addEventListener('pointerup', (e) => { if (drag && e.pointerId === drag.id) endDrag(true); });
-document.addEventListener('pointercancel', () => endDrag(false));
-document.addEventListener('contextmenu', (e) => { if (e.target.closest('[data-drag]')) e.preventDefault(); });
+document.addEventListener('pointerup', (e) => { if (drag && e.pointerId === drag.id) endDrag(true, e); });
+document.addEventListener('pointercancel', () => endDrag(false, null));
+document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('[data-drag]')) e.preventDefault(); });
 
 /* ---------- opstarten ---------- */
 window.addEventListener('pagehide', persist);
@@ -921,9 +1151,12 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 (async function init() {
   state = await loadState();
+  savedLineups = loadSaved();
   render();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* negeer */ }
   if ('serviceWorker' in navigator) {
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) toast('TeamSheet is bijgewerkt – sluit en open de app opnieuw'); });
     window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
   }
   let never = false;

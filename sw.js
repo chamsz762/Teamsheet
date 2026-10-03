@@ -1,5 +1,5 @@
 /* TeamSheet service worker – cache-first met stille update op de achtergrond */
-const CACHE = 'teamsheet-v1.0.0';
+const CACHE = 'teamsheet-v1.1.0';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './icon-maskable-512.png',
@@ -8,7 +8,12 @@ const ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE)
+      .then((c) => Promise.all(ASSETS.map((u) => fetch(new Request(u, { cache: 'reload' })).then((r) => {
+        if (!r.ok) throw new Error('Cache mislukt: ' + u);
+        return c.put(u, r);
+      }))))
+      .then(() => self.skipWaiting())
   );
 });
 
