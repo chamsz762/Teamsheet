@@ -1,7 +1,7 @@
 'use strict';
 /* TeamSheet – lokale voetbal-PWA. Geen account, geen backend. */
 
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 const THEME_KEY = 'teamsheet_theme';
 const SAVED_KEY = 'teamsheet_saved_lineups_v1';
 const POSITIONS = ['Keeper','Centrale verdediger','Linksback','Rechtsback','Middenvelder','Linksmidden','Rechtsmidden','Aanvallende middenvelder','Linksbuiten','Rechtsbuiten','Spits'];
@@ -102,6 +102,7 @@ function normalize(s) {
   o.settings = Object.assign(defaultState().settings, (s && s.settings) || {});
   if (!FORMATIONS[o.settings.defaultFormation]) o.settings.defaultFormation = '4-3-3';
   ['players', 'matches', 'events'].forEach((k) => { if (!Array.isArray(o[k])) o[k] = []; });
+  o.players.forEach((p) => { if (!('photo' in p) || p.photo === undefined) p.photo = null; });
   if (!o.minutes || typeof o.minutes !== 'object') o.minutes = {};
   if (!o.lineups || typeof o.lineups !== 'object') o.lineups = {};
   if (!o.lineups.default) o.lineups.default = newLineup(o.settings.defaultFormation);
@@ -457,7 +458,12 @@ function avatar(p, size) {
 }
 function isCaptain(id) { const l0 = state.lineups[ui.lineupKey] || state.lineups.default; return !!l0 && l0.captain === id; }
 function chipHTML(p, selected, drag) {
-  return '<div class="chip' + (selected ? ' sel' : '') + '" data-chip="' + p.id + '"' + (drag ? ' data-drag="' + p.id + '"' : '') + '><div class="num">' + esc(p.number) + (isCaptain(p.id) ? '<i class="cap">C</i>' : '') + '</div><div class="nm">' + esc(shortName(p)) + '</div></div>';
+  const cap = isCaptain(p.id) ? '<i class="cap">C</i>' : '';
+  const face = p.photo
+    ? '<div class="num ph"><img src="' + p.photo + '" alt="" draggable="false"><b class="nb">' + esc(p.number) + '</b>' + cap + '</div>'
+    : '<div class="num">' + esc(p.number) + cap + '</div>';
+  const st = STATUS_LABEL[p.status] ? '<div class="st">● ' + STATUS_LABEL[p.status] + '</div>' : '';
+  return '<div class="chip' + (selected ? ' sel' : '') + '" data-chip="' + p.id + '"' + (drag ? ' data-drag="' + p.id + '"' : '') + '>' + face + '<div class="nm">' + esc(shortName(p)) + '</div>' + st + '</div>';
 }
 function statTiles(s, hl, four) {
   const t = [['matches', 'Wedstrijden', s.matches], ['starts', 'Basis', s.starts], ['subs', 'Ingevallen', s.subs], ['goals', 'Doelpunten', s.goals], ['assists', 'Assists', s.assists], ['yellow', 'Gele kaarten', s.yellow], ['red', 'Rode kaarten', s.red], ['minutes', 'Minuten', s.minutes]];
@@ -764,7 +770,8 @@ function modalHTML(m) {
     formTmp = {photo: p ? p.photo : null};
     return '<form data-form="player" autocomplete="off"><h2>' + (p ? 'Speler bewerken' : 'Speler toevoegen') + '</h2>' +
       '<div class="photo-row"><div id="photoPrev">' + avatar(p ? Object.assign({}, p, {photo: formTmp.photo}) : null, 72) + '</div><div style="flex:1;display:grid;gap:8px">' +
-      '<label class="btn small sec" style="width:100%">' + ic('camera', 'sm') + ' Foto kiezen<input type="file" accept="image/*" data-change="photo" hidden></label>' +
+      '<div class="grid2"><label class="btn small sec" style="width:100%">' + ic('camera', 'sm') + ' Kies foto<input type="file" accept="image/*" data-change="photo" hidden></label>' +
+      '<label class="btn small sec" style="width:100%">' + ic('camera', 'sm') + ' Maak foto<input type="file" accept="image/*" capture="environment" data-change="photo" hidden></label></div>' +
       '<button type="button" class="btn small danger" style="width:100%" data-act="clearPhoto">Foto verwijderen</button></div></div>' +
       '<div class="grid2"><label class="field"><span>Voornaam</span><input name="firstName" value="' + esc(p ? p.firstName : '') + '" required autocapitalize="words"></label>' +
       '<label class="field"><span>Achternaam</span><input name="lastName" value="' + esc(p ? p.lastName : '') + '" autocapitalize="words"></label></div>' +
@@ -1217,6 +1224,12 @@ function clipText(g, text, maxW) {
   return t + '…';
 }
 /* tekent de huidige opstelling met dezelfde slotXY()-posities als het formatiescherm */
+function drawPhoto(g, img, cx, cy, r) {
+  g.save(); g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.clip();
+  const k = Math.max(2 * r / img.width, 2 * r / img.height);
+  g.drawImage(img, cx - img.width * k / 2, cy - img.height * k / 2, img.width * k, img.height * k);
+  g.restore();
+}
 async function buildShareCanvas() {
   const l = curLineup();
   const dark = isDarkNow();
@@ -1230,6 +1243,10 @@ async function buildShareCanvas() {
   const bench = l.bench.map(P).filter(Boolean);
   const out = state.players.filter((p) => STATUS_LABEL[p.status]).sort((a, b) => a.number - b.number);
   const cap = l.captain ? P(l.captain) : null;
+  /* dezelfde foto als in het spelersprofiel (p.photo) */
+  const imgs = {};
+  const need = new Set(l.positions.filter(Boolean).concat(l.bench, out.map((q) => q.id)));
+  await Promise.all(Array.from(need).map(async (id) => { const q = P(id); if (q && q.photo) imgs[id] = await loadImg(q.photo); }));
 
   const HEAD = cap ? 310 : 260;
   const PW = 760, PH = Math.round(PW * 105 / 68);
@@ -1312,14 +1329,32 @@ async function buildShareCanvas() {
     const cx = px + c.x / 100 * PW, cy = py + c.y / 100 * PH;
     g.save(); g.shadowColor = 'rgba(0,0,0,.35)'; g.shadowBlur = 10; g.shadowOffsetY = 4;
     g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fillStyle = '#0b3d24'; g.fill(); g.restore();
+    if (imgs[pid]) drawPhoto(g, imgs[pid], cx, cy, R - 3);
     g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.lineWidth = 6; g.strokeStyle = '#ffffff'; g.stroke();
-    g.fillStyle = '#ffffff'; g.font = '900 ' + (String(p.number).length > 2 ? 34 : 44) + 'px ' + FONT; g.textBaseline = 'middle';
-    g.fillText(String(p.number), cx, cy + 2);
+    g.textBaseline = 'middle';
+    if (imgs[pid]) {
+      const ns = String(p.number);
+      g.font = '900 24px ' + FONT;
+      const bw = Math.max(44, g.measureText(ns).width + 22), bx = cx - R * 0.78, by = cy + R * 0.78;
+      rrect(g, bx - bw / 2, by - 20, bw, 40, 20); g.fillStyle = '#0b3d24'; g.fill(); g.lineWidth = 4; g.strokeStyle = '#ffffff'; g.stroke();
+      g.fillStyle = '#ffffff'; g.fillText(ns, bx, by + 1);
+    } else {
+      g.fillStyle = '#ffffff'; g.font = '900 ' + (String(p.number).length > 2 ? 34 : 44) + 'px ' + FONT;
+      g.fillText(String(p.number), cx, cy + 2);
+    }
     g.font = '800 31px ' + FONT;
     const nm = clipText(g, shortName(p), 190);
     const nw = g.measureText(nm).width + 30;
     rrect(g, cx - nw / 2, cy + R + 8, nw, 46, 23); g.fillStyle = '#ffffff'; g.fill();
     g.fillStyle = '#15211b'; g.fillText(nm, cx, cy + R + 32);
+    if (STATUS_LABEL[p.status]) {
+      const tl = STATUS_LABEL[p.status];
+      g.font = '800 24px ' + FONT;
+      const tw = g.measureText(tl).width + 46, ty = cy + R + 60;
+      rrect(g, cx - tw / 2, ty, tw, 34, 17); g.fillStyle = '#d33a3a'; g.fill();
+      g.beginPath(); g.arc(cx - tw / 2 + 18, ty + 17, 5, 0, Math.PI * 2); g.fillStyle = '#ffffff'; g.fill();
+      g.textAlign = 'left'; g.fillText(tl, cx - tw / 2 + 31, ty + 18); g.textAlign = 'center';
+    }
     if (l.captain === pid) {
       g.beginPath(); g.arc(cx + R * 0.78, cy - R * 0.78, 20, 0, Math.PI * 2); g.fillStyle = '#f5c518'; g.fill();
       g.lineWidth = 4; g.strokeStyle = '#ffffff'; g.stroke();
@@ -1341,8 +1376,17 @@ async function buildShareCanvas() {
       const col = i % benchCols, row = Math.floor(i / benchCols);
       const x = colX + col * (colW / benchCols), y = ly + TITLE + row * ROW;
       g.beginPath(); g.arc(x + 26, y + 26, 26, 0, Math.PI * 2); g.fillStyle = '#14583a'; g.fill();
-      g.fillStyle = '#ffffff'; g.font = '900 26px ' + FONT; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(String(p.number), x + 26, y + 28); g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      if (imgs[p.id]) {
+        drawPhoto(g, imgs[p.id], x + 26, y + 26, 26);
+        g.beginPath(); g.arc(x + 26, y + 26, 26, 0, Math.PI * 2); g.lineWidth = 3; g.strokeStyle = '#14583a'; g.stroke();
+        g.beginPath(); g.arc(x + 6, y + 46, 15, 0, Math.PI * 2); g.fillStyle = '#14583a'; g.fill(); g.lineWidth = 3; g.strokeStyle = C.card; g.stroke();
+        g.fillStyle = '#ffffff'; g.font = '900 17px ' + FONT; g.fillText(String(p.number), x + 6, y + 47);
+      } else {
+        g.fillStyle = '#ffffff'; g.font = '900 26px ' + FONT;
+        g.fillText(String(p.number), x + 26, y + 28);
+      }
+      g.textAlign = 'left'; g.textBaseline = 'alphabetic';
       g.fillStyle = C.text;
       fitFont(g, fullName(p), colW / benchCols - 80, 34, 24, '700', FONT);
       g.fillText(clipText(g, fullName(p), colW / benchCols - 80), x + 66, y + 38);
@@ -1354,10 +1398,15 @@ async function buildShareCanvas() {
     out.forEach((p, i) => {
       const y = ly + TITLE + i * ROW;
       g.beginPath(); g.arc(colX + 14, y + 24, 12, 0, Math.PI * 2); g.fillStyle = '#d33a3a'; g.fill();
+      const off = imgs[p.id] ? 54 : 0;
+      if (imgs[p.id]) {
+        drawPhoto(g, imgs[p.id], colX + 42 + 24, y + 24, 24);
+        g.beginPath(); g.arc(colX + 42 + 24, y + 24, 24, 0, Math.PI * 2); g.lineWidth = 3; g.strokeStyle = '#d33a3a'; g.stroke();
+      }
       g.fillStyle = C.text;
       const label = fullName(p) + ' — ' + STATUS_LABEL[p.status];
-      fitFont(g, label, colW - 50, 32, 22, '700', FONT);
-      g.fillText(clipText(g, label, colW - 50), colX + 42, y + 36);
+      fitFont(g, label, colW - 50 - off, 32, 22, '700', FONT);
+      g.fillText(clipText(g, label, colW - 50 - off), colX + 42 + off, y + 36);
     });
   }
 
