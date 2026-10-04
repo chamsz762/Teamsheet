@@ -134,7 +134,7 @@ img.avatar{display:block}
 .role{font-size:calc(var(--cs)*.32);font-weight:800;color:rgba(255,255,255,.88);margin-top:2px}
 .chip{display:flex;flex-direction:column;align-items:center;gap:3px;touch-action:none}
 .chip .num{width:var(--cs);height:var(--cs);border-radius:50%;background:var(--green);color:#fff;border:2px solid #fff;display:grid;place-items:center;font-weight:900;font-size:calc(var(--cs)*.42);box-shadow:0 2px 5px rgba(0,0,0,.3)}
-.chip .nm{background:#fff;color:var(--text);font-weight:700;font-size:calc(var(--cs)*.31);padding:1px 7px;border-radius:99px;max-width:calc(var(--cs)*1.75);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.chip .nm{background:#fff;color:#15211b;font-weight:700;font-size:calc(var(--cs)*.31);padding:1px 7px;border-radius:99px;max-width:calc(var(--cs)*1.75);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 3px rgba(0,0,0,.2)}
 .dragging{opacity:.3}
 .dragghost{position:fixed;z-index:100;pointer-events:none;transform:translate(-50%,-70%) scale(1.15);--cs:50px;filter:drop-shadow(0 8px 10px rgba(0,0,0,.35))}
 .droptarget{outline:3px dashed var(--yellow);outline-offset:-3px}
@@ -206,3 +206,55 @@ img.avatar{display:block}
 .pitch.droptarget{outline:3px dashed var(--yellow);outline-offset:-6px}
 .pitch{touch-action:pan-y}
 .list>.btn{width:100%}
+
+/* v1.2 – share card voorbeeld + donker thema */
+.sheet img.preview{-webkit-touch-callout:default;-webkit-user-select:auto;user-select:auto}
+.sheet a.btn{box-sizing:border-box}
+.seg span{font-size:12.5px;text-align:center;padding:0 2px;white-space:nowrap}
+
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --green:#0a2a1a; --green2:#2a9d68; --accent:#34b878; --accent-soft:#1d3a2b;
+  --bg:#0f1613; --card:#18221d; --text:#e9f0ec; --muted:#9aaba2; --line:#2b3832; --red:#ef5a5a;
+}
+html[data-theme="dark"] .bottom{background:rgba(20,29,25,.97)}
+html[data-theme="dark"] .card{box-shadow:0 1px 2px rgba(0,0,0,.4)}
+html[data-theme="dark"] .btn.sec,
+html[data-theme="dark"] .btn.danger,
+html[data-theme="dark"] .pill,
+html[data-theme="dark"] .search,
+html[data-theme="dark"] .field input,
+html[data-theme="dark"] .field select,
+html[data-theme="dark"] .field textarea,
+html[data-theme="dark"] .strip,
+html[data-theme="dark"] .sheet{background:var(--card)}
+html[data-theme="dark"] .btn.danger{border-color:#5a2a2a;color:var(--red)}
+html[data-theme="dark"] .btn.solid-danger{background:#c93a3a;color:#fff}
+html[data-theme="dark"] .field input,
+html[data-theme="dark"] .field select,
+html[data-theme="dark"] .field textarea,
+html[data-theme="dark"] .search{color:var(--text)}
+html[data-theme="dark"] .search::placeholder{color:var(--muted)}
+html[data-theme="dark"] .pill{color:var(--muted)}
+html[data-theme="dark"] .pill.on{color:#fff}
+html[data-theme="dark"] .seg input:checked+span{background:#2a3a33;color:#fff;box-shadow:none}
+html[data-theme="dark"] .rowcard:active{background:#1f2c26}
+html[data-theme="dark"] .sheet .grab{background:#3a4a43}
+html[data-theme="dark"] .tile{background:#1f2c26}
+html[data-theme="dark"] .tile.hl{background:var(--accent-soft)}
+html[data-theme="dark"] .badge.w{background:#16402a;color:#5fdc9b}
+html[data-theme="dark"] .badge.d{background:#4a3a14;color:#f2b44d}
+html[data-theme="dark"] .badge.l{background:#4a1f1f;color:#ff8d8d}
+html[data-theme="dark"] .bignum{color:#4fd08a}
+html[data-theme="dark"] .rank .val,
+html[data-theme="dark"] .tile.hl b,
+html[data-theme="dark"] .ev .min{color:#4fd08a}
+html[data-theme="dark"] .bottom button.on{color:#4fd08a}
+html[data-theme="dark"] .btn.sec{color:#4fd08a}
+html[data-theme="dark"] .btn.ghost{color:#4fd08a}
+html[data-theme="dark"] .count,
+html[data-theme="dark"] .tag{color:#4fd08a}
+html[data-theme="dark"] .pitch{border-color:#0a2a1a;background:repeating-linear-gradient(to bottom,#25773f 0,#25773f 10%,#1f6a37 10%,#1f6a37 20%)}
+html[data-theme="dark"] .strip .chip .nm{background:#e9f0ec}
+html[data-theme="dark"] .kv .ic{color:#4fd08a}
+html[data-theme="dark"] .avatar{color:#4fd08a}

@@ -1,5 +1,5 @@
 /* TeamSheet service worker – cache-first met stille update op de achtergrond */
-const CACHE = 'teamsheet-v1.1.0';
+const CACHE = 'teamsheet-v1.2';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './icon-maskable-512.png',

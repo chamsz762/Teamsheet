@@ -1,7 +1,8 @@
 'use strict';
 /* TeamSheet – lokale voetbal-PWA. Geen account, geen backend. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2';
+const THEME_KEY = 'teamsheet_theme';
 const SAVED_KEY = 'teamsheet_saved_lineups_v1';
 const POSITIONS = ['Keeper','Centrale verdediger','Linksback','Rechtsback','Middenvelder','Linksmidden','Rechtsmidden','Aanvallende middenvelder','Linksbuiten','Rechtsbuiten','Spits'];
 const POS_ABBR = {'Keeper':'K','Centrale verdediger':'CV','Linksback':'LV','Rechtsback':'RV','Middenvelder':'M','Linksmidden':'LM','Rechtsmidden':'RM','Aanvallende middenvelder':'AM','Linksbuiten':'LB','Rechtsbuiten':'RB','Spits':'SP'};
@@ -462,6 +463,8 @@ function statTiles(s, hl, four) {
   const t = [['matches', 'Wedstrijden', s.matches], ['starts', 'Basis', s.starts], ['subs', 'Ingevallen', s.subs], ['goals', 'Doelpunten', s.goals], ['assists', 'Assists', s.assists], ['yellow', 'Gele kaarten', s.yellow], ['red', 'Rode kaarten', s.red], ['minutes', 'Minuten', s.minutes]];
   return '<div class="tiles four">' + t.map((x) => '<div class="tile' + (hl === x[0] ? ' hl' : '') + '"><b>' + x[2] + '</b><span>' + x[1] + '</span></div>').join('') + '</div>';
 }
+const STATUS_LABEL = {blessure: 'Geblesseerd', afwezig: 'Afwezig'};
+function statusTag(p) { return STATUS_LABEL[p.status] ? ' · <span style="color:var(--red);font-weight:700">● ' + STATUS_LABEL[p.status] + '</span>' : ''; }
 function emptyState(icon, text, btn, act) {
   return '<div class="card empty"><div class="big">' + icon + '</div><p>' + text + '</p><button class="btn" data-act="' + act + '">' + btn + '</button></div>';
 }
@@ -482,7 +485,7 @@ function playerListHTML() {
   if (!list.length) return '<p class="muted" style="text-align:center;padding:24px 0">Geen spelers gevonden.</p>';
   return '<div class="list">' + list.map((p) =>
     '<button class="card rowcard" data-act="player" data-id="' + p.id + '">' + avatar(p, 50) +
-    '<div class="mid"><div class="nm">' + esc(fullName(p)) + '</div><div class="ps">' + esc(p.position) + '</div></div>' +
+    '<div class="mid"><div class="nm">' + esc(fullName(p)) + '</div><div class="ps">' + esc(p.position) + statusTag(p) + '</div></div>' +
     '<div class="bignum">' + esc(p.number) + '</div></button>').join('') + '</div>';
 }
 function teamHTML() {
@@ -503,7 +506,7 @@ function playerDetailHTML(id) {
   const s = computeStats().per[p.id];
   return '<div class="page stack"><div class="card" style="text-align:center">' + avatar(p, 108) +
     '<h2 style="margin-top:10px;font-size:24px">' + esc(fullName(p)) + '</h2>' +
-    '<p class="sub" style="font-size:16px">#' + esc(p.number) + ' · ' + esc(p.position) + '</p></div>' +
+    '<p class="sub" style="font-size:16px">#' + esc(p.number) + ' · ' + esc(p.position) + statusTag(p) + '</p></div>' +
     '<div class="card"><h3 style="margin-bottom:10px">Statistieken</h3>' + statTiles(s) +
     '<p class="muted" style="font-size:12px;margin-top:8px">Alleen afgeronde wedstrijden tellen mee.</p></div>' +
     '<button class="btn" data-act="editPlayer" data-id="' + p.id + '">Speler bewerken</button></div>';
@@ -553,6 +556,7 @@ function lineupHTML() {
     '<div class="list" style="margin-top:14px">' +
     (opened ? '<button class="btn" data-act="updateLineup">Opstelling bijwerken</button>' : '') +
     '<button class="btn' + (opened ? ' sec' : '') + '" data-act="saveLineup">Opstelling opslaan</button>' +
+    '<button class="btn sec" data-act="shareLineup">📤 Opstelling delen</button>' +
     '<button class="btn sec" data-act="myLineups">Mijn opstellingen' + (savedLineups.length ? ' (' + savedLineups.length + ')' : '') + '</button>' +
     '<button class="btn ghost" data-act="newLineup">+ Nieuwe opstelling</button></div>' +
     '<section class="blk"><div class="between"><h3>Wisselspelers<span class="count">' + bench.length + '</span></h3><button class="btn small ghost" data-act="pickBenchOpen">' + ic('plus', 'sm') + ' Toevoegen</button></div>' +
@@ -667,7 +671,11 @@ function installSteps() {
 function settingsHTML() {
   const fOpts = Object.keys(FORMATIONS).map((f) => '<option' + (state.settings.defaultFormation === f ? ' selected' : '') + '>' + f + '</option>').join('');
   const logo = state.team.logo ? '<img class="logo-prev" src="' + state.team.logo + '" alt="">' : '<div class="logo-prev">Geen logo</div>';
+  const th = getThemePref();
+  const themeOpt = (v, label) => '<label><input type="radio" name="theme" value="' + v + '" data-change="theme"' + (th === v ? ' checked' : '') + '><span>' + label + '</span></label>';
   return '<div class="page stack">' +
+    '<div class="card"><h3>Weergave</h3><p class="sub" style="margin:4px 0 12px">Kies het thema van TeamSheet.</p><div class="seg">' +
+    themeOpt('light', '☀️ Licht') + themeOpt('dark', '🌙 Donker') + themeOpt('auto', '⚙️ Automatisch') + '</div></div>' +
     '<div class="card"><h3>Team</h3><label class="field"><span>Teamnaam</span><input id="teamName" data-change="teamName" value="' + esc(state.team.name) + '" maxlength="40" autocomplete="off"></label>' +
     '<div class="photo-row" style="margin-top:14px">' + logo + '<div style="flex:1;display:grid;gap:8px"><label class="btn small sec" style="width:100%">' + ic('camera', 'sm') + ' Logo kiezen<input type="file" accept="image/*" data-change="logo" hidden></label>' +
     (state.team.logo ? '<button class="btn small danger" style="width:100%" data-act="removeLogo">Logo verwijderen</button>' : '') + '</div></div>' +
@@ -725,6 +733,14 @@ function modalHTML(m) {
     return '<h2>Wisselspeler toevoegen</h2><div class="picklist" style="margin-top:8px">' + (players.length ? players.map((p) =>
       '<button data-act="pickBench" data-id="' + p.id + '">' + avatar(p, 40) + '<div><b>' + esc(p.number + ' · ' + fullName(p)) + '</b><div class="muted" style="font-size:13px">' + esc(p.position) + '</div></div></button>').join('') : '<p class="sub" style="padding:16px 0">Geen beschikbare spelers.</p>') + '</div><div class="actions"><button class="btn sec" data-act="closeModal">Sluiten</button></div>';
   }
+  if (m.type === 'sharePreview') {
+    const canShareNow = !!(lastShare && navigator.canShare && navigator.canShare({files: [lastShare.file]}));
+    return '<h2>Share Card</h2><p class="sub">Je browser kan de afbeelding niet direct delen. Sla hem op en deel hem daarna zelf, of houd de afbeelding ingedrukt.</p>' +
+      '<img class="preview" src="' + m.url + '" alt="Share Card" style="width:100%;border-radius:14px;margin-top:12px;border:1px solid var(--line)">' +
+      '<div class="list" style="margin-top:14px">' + (canShareNow ? '<button class="btn" data-act="shareAgain">📤 Delen</button>' : '') +
+      '<a class="btn' + (canShareNow ? ' sec' : '') + '" href="' + m.url + '" download="' + esc(lastShare.file.name) + '" style="text-decoration:none">Share Card opslaan</a>' +
+      '<button class="btn sec" data-act="closeModal">Sluiten</button></div>';
+  }
   if (m.type === 'saveLineup') {
     return '<form data-form="saveLineup" autocomplete="off"><h2>Opstelling opslaan</h2><p class="sub">' + esc(curLineup().formation) + ' · ' + curLineup().positions.filter(Boolean).length + ' spelers op het veld</p>' +
       '<label class="field"><span>Naam van de opstelling</span><input name="name" placeholder="Bijv. Competitie – zondag" maxlength="40" required autocapitalize="sentences"></label>' + formActions() + '</form>';
@@ -754,6 +770,7 @@ function modalHTML(m) {
       '<label class="field"><span>Achternaam</span><input name="lastName" value="' + esc(p ? p.lastName : '') + '" autocapitalize="words"></label></div>' +
       '<label class="field"><span>Rugnummer</span><input name="number" type="number" inputmode="numeric" min="0" max="999" value="' + (p ? p.number : '') + '" required></label>' +
       '<label class="field"><span>Positie</span><select name="position">' + POSITIONS.map((x) => '<option' + ((p ? p.position : 'Middenvelder') === x ? ' selected' : '') + '>' + x + '</option>').join('') + '</select></label>' +
+      '<label class="field"><span>Status</span><select name="pstatus"><option value="fit"' + (!p || !STATUS_LABEL[p.status] ? ' selected' : '') + '>Beschikbaar</option><option value="blessure"' + (p && p.status === 'blessure' ? ' selected' : '') + '>Geblesseerd</option><option value="afwezig"' + (p && p.status === 'afwezig' ? ' selected' : '') + '>Afwezig</option></select></label>' +
       formActions() + (p ? '<button type="button" class="btn danger" style="margin-top:10px" data-act="deletePlayer" data-id="' + p.id + '">Speler verwijderen</button>' : '') + '</form>';
   }
   if (m.type === 'match') {
@@ -820,12 +837,13 @@ const forms = {
     if (!first) { toast('Vul een voornaam in'); return; }
     if (!(num >= 0 && num <= 999)) { toast('Vul een geldig rugnummer in'); return; }
     const pos = POSITIONS.includes(fd.get('position')) ? fd.get('position') : 'Middenvelder';
+    const pst = (fd.get('pstatus') === 'blessure' || fd.get('pstatus') === 'afwezig') ? fd.get('pstatus') : 'fit';
     const id = ui.modal.id;
     const dup = state.players.some((p) => p.number === num && p.id !== id);
     if (id && P(id)) {
-      Object.assign(P(id), {firstName: first, lastName: last, number: num, position: pos, photo: formTmp.photo || null});
+      Object.assign(P(id), {firstName: first, lastName: last, number: num, position: pos, photo: formTmp.photo || null, status: pst});
     } else {
-      state.players.push({id: uid(), firstName: first, lastName: last, number: num, position: pos, photo: formTmp.photo || null});
+      state.players.push({id: uid(), firstName: first, lastName: last, number: num, position: pos, photo: formTmp.photo || null, status: pst});
     }
     save(); ui.modal = null; renderModal(); render(); buzz();
     toast(dup ? 'Opgeslagen – let op: rugnummer is dubbel' : 'Speler opgeslagen');
@@ -998,6 +1016,12 @@ function act(name, d) {
       break;
     }
     case 'selCaptain': if (ui.sel) { const l = curLineup(); l.captain = l.captain === ui.sel ? null : ui.sel; ui.sel = null; save(); render(); } break;
+    case 'shareLineup': shareLineup(); break;
+    case 'shareAgain':
+      if (lastShare) {
+        navigator.share({files: [lastShare.file], title: lastShare.title}).catch(() => {});
+      }
+      break;
     case 'closeModal': closeModal(); break;
     case 'confirmYes': { const r = confirmResolve; confirmResolve = null; ui.modal = null; renderModal(); if (r) r(true); break; }
     case 'installNever': try { localStorage.setItem('ts_install_never', '1'); } catch (e) { /* negeer */ } closeModal(); break;
@@ -1046,7 +1070,8 @@ document.addEventListener('input', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target; const k = t.dataset && t.dataset.change; if (!k) return;
   const m = curMatch();
-  if (k === 'lineupKey') { ui.lineupKey = t.value; ui.sel = null; render(); }
+  if (k === 'theme') { try { localStorage.setItem(THEME_KEY, t.value); } catch (err) { /* negeer */ } applyTheme(); render(); }
+  else if (k === 'lineupKey') { ui.lineupKey = t.value; ui.sel = null; render(); }
   else if (k === 'formation') { setFormation(curLineup(), t.value); save(); render(); }
   else if (k === 'status' && m) { m.status = t.value === 'afgerond' ? 'afgerond' : 'gepland'; if (m.status === 'afgerond') autoMinutes(m, false); save(); render(); }
   else if (k === 'teamName') { state.team.name = t.value.trim() || 'Mijn team'; save(); }
@@ -1145,11 +1170,233 @@ document.addEventListener('pointerup', (e) => { if (drag && e.pointerId === drag
 document.addEventListener('pointercancel', () => endDrag(false, null));
 document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('[data-drag]')) e.preventDefault(); });
 
+/* ---------- thema (licht / donker / automatisch) ---------- */
+function getThemePref() {
+  try { const v = localStorage.getItem(THEME_KEY); return (v === 'dark' || v === 'auto' || v === 'light') ? v : 'light'; }
+  catch (e) { return 'light'; }
+}
+function isDarkNow() {
+  const pref = getThemePref();
+  const sys = !!(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+  return pref === 'dark' || (pref === 'auto' && sys);
+}
+function applyTheme() {
+  const dark = isDarkNow();
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', dark ? '#0a2a1a' : '#0b3d24');
+}
+
+/* ---------- Share Card (PNG) ---------- */
+let lastShare = null;
+let shareUrl = null;
+function loadImg(src) {
+  return new Promise((resolve) => {
+    if (!src) { resolve(null); return; }
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+function rrect(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function fitFont(g, text, maxW, start, min, weight, family) {
+  let px = start;
+  g.font = weight + ' ' + px + 'px ' + family;
+  while (px > min && g.measureText(text).width > maxW) { px -= 2; g.font = weight + ' ' + px + 'px ' + family; }
+  return px;
+}
+function clipText(g, text, maxW) {
+  if (g.measureText(text).width <= maxW) return text;
+  let t = text;
+  while (t.length > 1 && g.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+  return t + '…';
+}
+/* tekent de huidige opstelling met dezelfde slotXY()-posities als het formatiescherm */
+async function buildShareCanvas() {
+  const l = curLineup();
+  const dark = isDarkNow();
+  const C = dark
+    ? {bg: '#0e1512', card: '#18221d', text: '#eaf1ed', muted: '#9aaba2', line: '#2b3832', grassA: '#25773f', grassB: '#1f6a37', frame: '#0a2a1a'}
+    : {bg: '#f1f4f2', card: '#ffffff', text: '#15211b', muted: '#66736c', line: '#dfe6e2', grassA: '#2d8a47', grassB: '#257a3d', frame: '#0b3d24'};
+  const FONT = '-apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif';
+  const W = 1080, M = 60;
+  const logo = await loadImg(state.team.logo);
+  const match = ui.lineupKey !== 'default' ? state.matches.find((m) => m.id === ui.lineupKey) : null;
+  const bench = l.bench.map(P).filter(Boolean);
+  const out = state.players.filter((p) => STATUS_LABEL[p.status]).sort((a, b) => a.number - b.number);
+  const cap = l.captain ? P(l.captain) : null;
+
+  const HEAD = cap ? 310 : 260;
+  const PW = 760, PH = Math.round(PW * 105 / 68);
+  const ROW = 64, TITLE = 72;
+  const both = bench.length && out.length;
+  const colW = both ? (W - 2 * M - 40) / 2 : W - 2 * M;
+  const benchCols = both ? 1 : 2;
+  const outCols = both ? 1 : 1;
+  const benchH = bench.length ? TITLE + Math.ceil(bench.length / benchCols) * ROW : 0;
+  const outH = out.length ? TITLE + out.length * ROW : 0;
+  const lowerH = Math.max(benchH, outH);
+  const H = Math.max(1920, HEAD + 30 + PH + (lowerH ? 40 + lowerH : 0) + 130);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const g = canvas.getContext('2d');
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+
+  /* header */
+  const grd = g.createLinearGradient(0, 0, 0, HEAD);
+  grd.addColorStop(0, dark ? '#0a2a1a' : '#0b3d24'); grd.addColorStop(1, '#14583a');
+  g.fillStyle = grd; g.fillRect(0, 0, W, HEAD);
+  let tx = M;
+  if (logo) {
+    g.save(); rrect(g, M, 56, 130, 130, 28); g.clip();
+    const k = Math.min(130 / logo.width, 130 / logo.height);
+    g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(M, 56, 130, 130);
+    g.drawImage(logo, M + (130 - logo.width * k) / 2, 56 + (130 - logo.height * k) / 2, logo.width * k, logo.height * k);
+    g.restore(); tx = M + 160;
+  }
+  g.textBaseline = 'alphabetic'; g.textAlign = 'left';
+  const pillW = 210;
+  g.fillStyle = '#ffffff';
+  fitFont(g, state.team.name.toUpperCase(), W - tx - M - pillW - 20, 70, 36, '900', FONT);
+  g.fillText(state.team.name.toUpperCase(), tx, 125);
+  if (match) {
+    const line = 'vs ' + match.opponent + ' · ' + fmtDate(match, {day: 'numeric', month: 'long', year: 'numeric'}) + (match.time ? ' · ' + match.time : '') + ' · ' + (match.homeAway === 'uit' ? 'Uit' : 'Thuis');
+    g.fillStyle = 'rgba(255,255,255,.88)';
+    fitFont(g, line, W - tx - M, 38, 24, '600', FONT);
+    g.fillText(line, tx, 182);
+  }
+  // formatie-label
+  rrect(g, W - M - pillW, 70, pillW, 90, 45); g.fillStyle = '#ffffff'; g.fill();
+  g.fillStyle = '#0b3d24'; g.font = '900 52px ' + FONT; g.textAlign = 'center';
+  g.fillText(l.formation, W - M - pillW / 2, 133); g.textAlign = 'left';
+  if (cap) {
+    g.fillStyle = '#f5c518'; g.font = '800 40px ' + FONT;
+    g.fillText('★ AANVOERDER', M, 262);
+    const lw = g.measureText('★ AANVOERDER  ').width;
+    g.fillStyle = '#ffffff'; g.font = '700 40px ' + FONT;
+    g.fillText(clipText(g, fullName(cap), W - 2 * M - lw), M + lw, 262);
+  }
+
+  /* veld */
+  const px = (W - PW) / 2, py = HEAD + 30;
+  const s = PW / 68;
+  g.save(); rrect(g, px, py, PW, PH, 30); g.clip();
+  for (let i = 0; i < 10; i++) { g.fillStyle = i % 2 === 0 ? C.grassA : C.grassB; g.fillRect(px, py + i * PH / 10, PW, PH / 10 + 1); }
+  g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 4; g.fillStyle = 'rgba(255,255,255,.85)';
+  const X = (v) => px + v * s, Y = (v) => py + v * s;
+  g.strokeRect(X(2), Y(2), 64 * s, 101 * s);
+  g.beginPath(); g.moveTo(X(2), Y(52.5)); g.lineTo(X(66), Y(52.5)); g.stroke();
+  g.beginPath(); g.arc(X(34), Y(52.5), 9.15 * s, 0, Math.PI * 2); g.stroke();
+  g.beginPath(); g.arc(X(34), Y(52.5), 6, 0, Math.PI * 2); g.fill();
+  g.strokeRect(X(13.85), Y(2), 40.3 * s, 16.5 * s); g.strokeRect(X(13.85), Y(86.5), 40.3 * s, 16.5 * s);
+  g.strokeRect(X(24.85), Y(2), 18.3 * s, 5.5 * s); g.strokeRect(X(24.85), Y(97.5), 18.3 * s, 5.5 * s);
+  g.beginPath(); g.arc(X(34), Y(13), 6, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(X(34), Y(92), 6, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(X(34), Y(13), 9.15 * s, 0.93, Math.PI - 0.93); g.stroke();
+  g.beginPath(); g.arc(X(34), Y(92), 9.15 * s, Math.PI + 0.93, 2 * Math.PI - 0.93); g.stroke();
+  g.restore();
+  rrect(g, px, py, PW, PH, 30); g.lineWidth = 8; g.strokeStyle = C.frame; g.stroke();
+
+  /* spelers – exact dezelfde posities (percentages) als in de app */
+  const R = 46;
+  g.textAlign = 'center';
+  l.positions.forEach((pid, i) => {
+    const p = P(pid); if (!p) return;
+    const c = slotXY(l, i);
+    const cx = px + c.x / 100 * PW, cy = py + c.y / 100 * PH;
+    g.save(); g.shadowColor = 'rgba(0,0,0,.35)'; g.shadowBlur = 10; g.shadowOffsetY = 4;
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fillStyle = '#0b3d24'; g.fill(); g.restore();
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.lineWidth = 6; g.strokeStyle = '#ffffff'; g.stroke();
+    g.fillStyle = '#ffffff'; g.font = '900 ' + (String(p.number).length > 2 ? 34 : 44) + 'px ' + FONT; g.textBaseline = 'middle';
+    g.fillText(String(p.number), cx, cy + 2);
+    g.font = '800 31px ' + FONT;
+    const nm = clipText(g, shortName(p), 190);
+    const nw = g.measureText(nm).width + 30;
+    rrect(g, cx - nw / 2, cy + R + 8, nw, 46, 23); g.fillStyle = '#ffffff'; g.fill();
+    g.fillStyle = '#15211b'; g.fillText(nm, cx, cy + R + 32);
+    if (l.captain === pid) {
+      g.beginPath(); g.arc(cx + R * 0.78, cy - R * 0.78, 20, 0, Math.PI * 2); g.fillStyle = '#f5c518'; g.fill();
+      g.lineWidth = 4; g.strokeStyle = '#ffffff'; g.stroke();
+      g.fillStyle = '#3a2a00'; g.font = '900 24px ' + FONT; g.fillText('C', cx + R * 0.78, cy - R * 0.78 + 1);
+    }
+  });
+  g.textBaseline = 'alphabetic'; g.textAlign = 'left';
+
+  /* wissels + blessures / afwezig */
+  const ly = py + PH + 40;
+  const drawTitle = (txt, x, y) => {
+    g.fillStyle = C.text; g.font = '900 38px ' + FONT; g.fillText(txt, x, y + 40);
+    g.fillStyle = '#1fa35b'; g.fillRect(x, y + 52, 70, 6);
+  };
+  let colX = both ? M : M;
+  if (bench.length) {
+    drawTitle('WISSELSPELERS', colX, ly);
+    bench.forEach((p, i) => {
+      const col = i % benchCols, row = Math.floor(i / benchCols);
+      const x = colX + col * (colW / benchCols), y = ly + TITLE + row * ROW;
+      g.beginPath(); g.arc(x + 26, y + 26, 26, 0, Math.PI * 2); g.fillStyle = '#14583a'; g.fill();
+      g.fillStyle = '#ffffff'; g.font = '900 26px ' + FONT; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(String(p.number), x + 26, y + 28); g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+      g.fillStyle = C.text;
+      fitFont(g, fullName(p), colW / benchCols - 80, 34, 24, '700', FONT);
+      g.fillText(clipText(g, fullName(p), colW / benchCols - 80), x + 66, y + 38);
+    });
+    if (both) colX = M + colW + 40;
+  }
+  if (out.length) {
+    drawTitle('BLESSURES / AFWEZIG', colX, ly);
+    out.forEach((p, i) => {
+      const y = ly + TITLE + i * ROW;
+      g.beginPath(); g.arc(colX + 14, y + 24, 12, 0, Math.PI * 2); g.fillStyle = '#d33a3a'; g.fill();
+      g.fillStyle = C.text;
+      const label = fullName(p) + ' — ' + STATUS_LABEL[p.status];
+      fitFont(g, label, colW - 50, 32, 22, '700', FONT);
+      g.fillText(clipText(g, label, colW - 50), colX + 42, y + 36);
+    });
+  }
+
+  /* footer */
+  g.textAlign = 'center'; g.fillStyle = C.muted; g.font = '700 30px ' + FONT;
+  g.fillText('TeamSheet · v' + APP_VERSION, W / 2, H - 56);
+  g.textAlign = 'left';
+  return canvas;
+}
+function canvasToBlob(canvas) {
+  return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob'))), 'image/png'));
+}
+async function shareLineup() {
+  toast('Share Card maken…');
+  let blob;
+  try { blob = await canvasToBlob(await buildShareCanvas()); }
+  catch (e) { toast('Share Card maken mislukt'); return; }
+  const l = curLineup();
+  const file = new File([blob], 'teamsheet-opstelling-' + l.formation + '-' + todayStr() + '.png', {type: 'image/png'});
+  lastShare = {blob, file, title: 'Opstelling ' + state.team.name + ' (' + l.formation + ')'};
+  if (navigator.canShare && navigator.canShare({files: [file]})) {
+    try { await navigator.share({files: [file], title: lastShare.title}); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  if (shareUrl) URL.revokeObjectURL(shareUrl);
+  shareUrl = URL.createObjectURL(blob);
+  openModal('sharePreview', {url: shareUrl});
+}
+
 /* ---------- opstarten ---------- */
 window.addEventListener('pagehide', persist);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persist(); });
 
 (async function init() {
+  applyTheme();
+  try {
+    const mq = window.matchMedia && matchMedia('(prefers-color-scheme: dark)');
+    if (mq) { const onChange = () => { if (getThemePref() === 'auto') applyTheme(); }; if (mq.addEventListener) mq.addEventListener('change', onChange); else if (mq.addListener) mq.addListener(onChange); }
+  } catch (e) { /* negeer */ }
   state = await loadState();
   savedLineups = loadSaved();
   render();
