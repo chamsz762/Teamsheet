@@ -690,6 +690,13 @@ function settingsHTML() {
     '<div class="list"><button class="btn sec" data-act="export">' + ic('download', 'sm') + ' Exporteer gegevens</button>' +
     '<label class="btn sec">' + ic('upload', 'sm') + ' Importeer gegevens<input type="file" accept=".json,application/json" data-change="import" hidden></label>' +
     '<button class="btn danger" data-act="wipe">Alle gegevens verwijderen</button></div></div>' +
+    '<div class="card"><h3>Updates</h3>' +
+    '<div class="kv"><span>Geladen versie</span><b id="dgApp" style="margin-left:auto">v' + APP_VERSION + '</b></div>' +
+    '<div class="kv"><span>Nieuwste op server</span><b id="dgServer" style="margin-left:auto">…</b></div>' +
+    '<div class="kv"><span>Service worker</span><b id="dgSw" style="margin-left:auto">…</b></div>' +
+    '<div class="kv"><span>Cache</span><b id="dgCache" style="margin-left:auto;font-size:13px">…</b></div>' +
+    '<p class="sub" style="margin:8px 0 12px">TeamSheet controleert zelf op updates en laadt nieuwe versies automatisch. Je gegevens blijven altijd bewaard.</p>' +
+    '<div class="list"><button class="btn sec" data-act="checkUpdate">Controleer op updates</button><button class="btn danger" data-act="forceUpdate">Update forceren</button></div></div>' +
     '<div class="card inst"><h3>Installeren op je beginscherm</h3>' + installSteps() + '<p class="sub">Daarna opent TeamSheet als een gewone app, ook zonder internet.</p>' +
     '<p class="sub" style="margin-top:6px">Status: ' + (isStandalone() ? '✅ geïnstalleerd' : 'draait in de browser') + '</p></div>' +
     '<p class="sub" style="text-align:center">TeamSheet versie ' + APP_VERSION + '</p></div>';
@@ -934,7 +941,12 @@ async function importData(file) {
 function act(name, d) {
   const m = curMatch();
   switch (name) {
-    case 'settings': goSub('settings'); break;
+    case 'settings': goSub('settings'); refreshDiag(); break;
+    case 'applyUpdate': applyUpdate(); break;
+    case 'checkUpdate': checkForUpdate(true).then(refreshDiag); break;
+    case 'forceUpdate':
+      askConfirm('Update forceren?', 'De app wordt volledig ververst met de nieuwste bestanden. Je spelers, wedstrijden en opstellingen blijven bewaard.', 'Nu vernieuwen').then((ok) => { if (ok) forceUpdate(); });
+      break;
     case 'back': back(); break;
     case 'addPlayer': openModal('player'); break;
     case 'editPlayer': openModal('player', {id: d.id}); break;
@@ -1440,6 +1452,103 @@ async function shareLineup() {
 window.addEventListener('pagehide', persist);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persist(); });
 
+/* ---------- automatische updates ---------- */
+/* Werking: de app leest bij start, bij terugkeren in de app en elk half uur de VERSION uit sw.js op de server
+ * (altijd vers, cache wordt omzeild). Is die nieuwer dan APP_VERSION, dan worden eerst je gegevens bewaard en
+ * herlaadt de app zichzelf. Gegevens (IndexedDB/localStorage) worden nooit verwijderd. */
+let swReg = null, hadController = false, checking = false, reloadingForUpdate = false, lastUpdateCheck = 0;
+function cmpVersion(a, b) {
+  const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+async function fetchServerVersion() {
+  const r = await fetch('sw.js?nocache=' + Date.now(), {cache: 'no-store'});
+  if (!r.ok) throw new Error('http ' + r.status);
+  const m = (await r.text()).match(/const VERSION = '([0-9.]+)'/);
+  return m ? m[1] : null;
+}
+function updateBusy() { return !!ui.modal || !!drag; }
+function showUpdateBar(sv) {
+  let b = $('#updatebar');
+  if (!b) { b = document.createElement('div'); b.id = 'updatebar'; document.body.appendChild(b); }
+  b.innerHTML = '<span>' + (sv ? 'Nieuwe versie v' + esc(sv) + ' beschikbaar' : 'Nieuwe versie beschikbaar') + '</span><button data-act="applyUpdate">Nu bijwerken</button>';
+  b.classList.add('show');
+}
+function hideUpdateBar() { const b = $('#updatebar'); if (b) b.classList.remove('show'); }
+async function applyUpdate() {
+  if (reloadingForUpdate) return;
+  reloadingForUpdate = true;
+  toast('Nieuwe versie wordt geladen…');
+  await persist();
+  try {
+    const reg = swReg || (navigator.serviceWorker && await navigator.serviceWorker.getRegistration());
+    if (reg) await Promise.race([reg.update(), new Promise((r) => setTimeout(r, 4000))]);
+  } catch (e) { /* offline of geen service worker: alsnog herladen */ }
+  location.reload();
+}
+async function checkForUpdate(manual) {
+  if (checking || reloadingForUpdate) return;
+  checking = true;
+  try {
+    let sv = null;
+    try { sv = await fetchServerVersion(); }
+    catch (e) { if (manual) toast('Geen verbinding – controleren niet mogelijk'); return; }
+    try { if (swReg) swReg.update(); } catch (e) { /* negeer */ }
+    if (!sv) { if (manual) toast('Serverversie kon niet worden gelezen'); return; }
+    if (cmpVersion(sv, APP_VERSION) <= 0) {
+      hideUpdateBar();
+      if (manual) toast('Je gebruikt de nieuwste versie (v' + APP_VERSION + ')');
+      return;
+    }
+    let tried = null;
+    try { tried = sessionStorage.getItem('ts_update_try'); } catch (e) { /* negeer */ }
+    /* beveiliging tegen een herlaad-lus: automatisch maar één poging per versie per sessie */
+    if (!manual && (updateBusy() || tried === sv)) { showUpdateBar(sv); return; }
+    try { sessionStorage.setItem('ts_update_try', sv); } catch (e) { /* negeer */ }
+    await applyUpdate();
+  } finally { checking = false; }
+}
+async function forceUpdate() {
+  reloadingForUpdate = true;
+  await persist();
+  /* verwijdert ALLEEN service workers en caches; IndexedDB en localStorage (spelers, opstellingen) blijven staan */
+  try { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map((r) => r.unregister())); } catch (e) { /* negeer */ }
+  try { const keys = await caches.keys(); await Promise.all(keys.map((k) => caches.delete(k))); } catch (e) { /* negeer */ }
+  location.reload();
+}
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloadingForUpdate) return;   // eerste installatie: niets doen
+    if (updateBusy()) { showUpdateBar(''); return; }
+    reloadingForUpdate = true;
+    persist().then(() => location.reload());
+  });
+  try { swReg = await navigator.serviceWorker.register('./sw.js', {updateViaCache: 'none'}); }
+  catch (e) { /* geblokkeerd of offline */ }
+}
+function setupUpdateChecks() {
+  const run = (manual) => { lastUpdateCheck = Date.now(); return checkForUpdate(manual); };
+  setTimeout(() => run(false), 1200);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && Date.now() - lastUpdateCheck > 20000) run(false);
+  });
+  window.addEventListener('pageshow', (e) => { if (e.persisted) run(false); });
+  setInterval(() => { if (document.visibilityState === 'visible') run(false); }, 30 * 60 * 1000);
+}
+async function refreshDiag() {
+  const set = (id, t) => { const el = $('#' + id); if (el) el.textContent = t; };
+  set('dgApp', 'v' + APP_VERSION);
+  try { set('dgCache', ((await caches.keys()).join(', ')) || 'geen'); } catch (e) { set('dgCache', 'n.v.t.'); }
+  try { const reg = await navigator.serviceWorker.getRegistration(); set('dgSw', reg && reg.active ? 'actief' : 'niet actief'); } catch (e) { set('dgSw', 'niet beschikbaar'); }
+  try { const v = await fetchServerVersion(); set('dgServer', v ? 'v' + v : 'onbekend'); } catch (e) { set('dgServer', 'offline'); }
+}
+
 (async function init() {
   applyTheme();
   try {
@@ -1450,11 +1559,8 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   savedLineups = loadSaved();
   render();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* negeer */ }
-  if ('serviceWorker' in navigator) {
-    const hadController = !!navigator.serviceWorker.controller;
-    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) toast('TeamSheet is bijgewerkt – sluit en open de app opnieuw'); });
-    window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
-  }
+  registerServiceWorker();
+  setupUpdateChecks();
   let never = false;
   try { never = localStorage.getItem('ts_install_never') === '1'; } catch (e) { /* negeer */ }
   if (!isStandalone() && !never) setTimeout(() => { if (!ui.modal) openModal('install'); }, 700);
