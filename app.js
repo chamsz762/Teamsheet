@@ -1,7 +1,7 @@
 'use strict';
 /* TeamSheet – lokale voetbal-PWA. Geen account, geen backend. */
 
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 const THEME_KEY = 'teamsheet_theme';
 const SAVED_KEY = 'teamsheet_saved_lineups_v1';
 const POSITIONS = ['Keeper','Centrale verdediger','Linksback','Rechtsback','Middenvelder','Linksmidden','Rechtsmidden','Aanvallende middenvelder','Linksbuiten','Rechtsbuiten','Spits'];
@@ -102,7 +102,7 @@ function normalize(s) {
   o.settings = Object.assign(defaultState().settings, (s && s.settings) || {});
   if (!FORMATIONS[o.settings.defaultFormation]) o.settings.defaultFormation = '4-3-3';
   ['players', 'matches', 'events'].forEach((k) => { if (!Array.isArray(o[k])) o[k] = []; });
-  o.players.forEach((p) => { if (!('photo' in p) || p.photo === undefined) p.photo = null; });
+  o.players.forEach((p) => { if (!('photo' in p) || p.photo === undefined) p.photo = null; p.stats = cleanStats(p.stats); });
   if (!o.minutes || typeof o.minutes !== 'object') o.minutes = {};
   if (!o.lineups || typeof o.lineups !== 'object') o.lineups = {};
   if (!o.lineups.default) o.lineups.default = newLineup(o.settings.defaultFormation);
@@ -380,6 +380,66 @@ function computeStats() {
   return {per, team};
 }
 
+/* ---------- statistieken (v1.4) ----------
+ * Elke speler heeft p.stats (standaard 0 = handmatige bijstelling). De getoonde waarde is altijd
+ *   totaal = automatisch uit afgeronde wedstrijden + p.stats
+ * Met + / − of typen wijzig je het totaal; de app past p.stats zo aan dat het totaal klopt.
+ * Zo gaat er niets verloren en blijven wedstrijdregistraties gewoon meetellen. */
+const STAT_KEYS = ['matches', 'starts', 'subs', 'minutes', 'goals', 'assists', 'yellow', 'red', 'cleanSheets', 'goalsAgainst', 'saves'];
+const STAT_LABEL = {matches: 'Wedstrijden', starts: 'Basisplaatsen', subs: 'Wisselbeurten', minutes: 'Minuten', goals: 'Goals', assists: 'Assists', yellow: 'Gele kaarten', red: 'Rode kaarten', cleanSheets: 'Clean sheets', goalsAgainst: 'Tegendoelpunten', saves: 'Reddingen'};
+const STAT_STEP = {minutes: 5};
+function cleanStats(st) {
+  const o = {};
+  STAT_KEYS.forEach((k) => {
+    const n = Math.round(Number(st && st[k]));
+    o[k] = Number.isFinite(n) ? Math.max(-99999, Math.min(99999, n)) : 0;
+  });
+  return o;
+}
+function totalsFor(p, per) {
+  const a = (per && per[p.id]) || {};
+  const m = p.stats || {};
+  const o = {};
+  STAT_KEYS.forEach((k) => { o[k] = Math.max(0, (a[k] || 0) + (m[k] || 0)); });
+  return o;
+}
+function setStatTotal(p, key, target, per) {
+  const auto = ((per || computeStats().per)[p.id] || {})[key] || 0;
+  if (!p.stats) p.stats = cleanStats({});
+  p.stats[key] = Math.max(0, Math.min(99999, Math.round(target))) - auto;
+}
+function isKeeper(p) { return p.position === 'Keeper'; }
+function relevantStatKeys(p, t) {
+  if (isKeeper(p)) {
+    const k = ['matches', 'starts', 'subs', 'minutes', 'cleanSheets', 'goalsAgainst', 'saves'];
+    if (t.goals) k.push('goals');
+    if (t.assists) k.push('assists');
+    return k.concat(['yellow', 'red']);
+  }
+  return ['matches', 'starts', 'subs', 'minutes', 'goals', 'assists', 'yellow', 'red'];
+}
+function allTotals() {
+  const {per, team} = computeStats();
+  return {per, team, rows: state.players.map((p) => ({p, t: totalsFor(p, per)}))};
+}
+function teamTotals(rows, team) {
+  const sum = (k) => rows.reduce((a, r) => a + r.t[k], 0);
+  const maxM = rows.reduce((a, r) => Math.max(a, r.t.matches), 0);
+  return {matches: Math.max(team.played, maxM), goals: sum('goals'), assists: sum('assists'), yellow: sum('yellow'), red: sum('red'), cleanSheets: sum('cleanSheets')};
+}
+function statSortedRows(rows) {
+  const key = ui.statSort;
+  return rows.slice().sort((a, b) => (b.t[key] - a.t[key]) || (b.t.goals - a.t.goals) || (a.p.number - b.p.number));
+}
+function topRows(rows, key, n) {
+  return rows.filter((r) => r.t[key] > 0).sort((a, b) => (b.t[key] - a.t[key]) || (b.t.goals - a.t.goals) || (a.p.number - b.p.number)).slice(0, n);
+}
+function seasonLabel(d) {
+  const dt = d || new Date(); const y = dt.getFullYear();
+  const st = dt.getMonth() >= 6 ? y : y - 1;
+  return st + '/' + String(st + 1).slice(2);
+}
+
 /* ---------- afbeeldingen ---------- */
 function resizeImage(file, size, mode, type) {
   return new Promise((resolve, reject) => {
@@ -404,7 +464,7 @@ function resizeImage(file, size, mode, type) {
 }
 
 /* ---------- UI-state ---------- */
-const ui = {tab: 'team', sub: null, modal: null, sel: null, lineupKey: 'default', openedSaved: null, sort: 'nummer', q: '', statSort: 'goals'};
+const ui = {tab: 'team', sub: null, modal: null, sel: null, lineupKey: 'default', openedSaved: null, sort: 'nummer', q: '', statSort: 'goals', statOrder: null};
 let resetScroll = false;
 let formTmp = {};
 let confirmResolve = null;
@@ -426,7 +486,7 @@ function back() { ui.sub = null; resetScroll = true; render(); }
 
 function headerHTML() {
   if (ui.sub) {
-    const t = ui.sub.type === 'settings' ? 'Instellingen' : ui.sub.type === 'player' ? 'Spelerprofiel' : 'Wedstrijd';
+    const t = ui.sub.type === 'settings' ? 'Instellingen' : ui.sub.type === 'player' ? 'Spelerprofiel' : ui.sub.type === 'pstats' ? 'Spelerstatistieken' : 'Wedstrijd';
     return '<button class="hbtn" data-act="back" aria-label="Terug">' + ic('back') + '</button><div class="htitle">' + t + '</div><span class="hbtn ph"></span>';
   }
   const logo = state.team.logo ? '<img src="' + state.team.logo + '" alt="">' : '<span class="logo-ball">' + ic('ball', 'sm') + '</span>';
@@ -441,6 +501,7 @@ function viewHTML() {
   if (ui.sub) {
     if (ui.sub.type === 'player') return playerDetailHTML(ui.sub.id);
     if (ui.sub.type === 'match') return matchDetailHTML(ui.sub.id);
+    if (ui.sub.type === 'pstats') return pstatsHTML(ui.sub.id);
     return settingsHTML();
   }
   if (ui.tab === 'lineup') return lineupHTML();
@@ -502,6 +563,7 @@ function teamHTML() {
   const sorts = [['nummer', 'Rugnummer'], ['naam', 'Naam'], ['positie', 'Positie']];
   return '<div class="page">' + head +
     '<button class="btn" style="margin-top:16px" data-act="addPlayer">+ Speler toevoegen</button>' +
+    '<button class="btn sec" style="margin-top:10px" data-act="openStats">📊 Statistieken</button>' +
     '<input class="search" id="q" type="search" placeholder="Zoek speler…" value="' + esc(ui.q) + '" autocomplete="off">' +
     '<div class="pills">' + sorts.map((s) => '<button class="pill' + (ui.sort === s[0] ? ' on' : '') + '" data-act="sort" data-v="' + s[0] + '">' + s[1] + '</button>').join('') + '</div>' +
     '<div id="playerList" style="margin-top:6px">' + playerListHTML() + '</div></div>';
@@ -509,12 +571,13 @@ function teamHTML() {
 function playerDetailHTML(id) {
   const p = P(id);
   if (!p) return '<div class="page"><p class="muted">Speler niet gevonden.</p></div>';
-  const s = computeStats().per[p.id];
+  const s = totalsFor(p, computeStats().per);
   return '<div class="page stack"><div class="card" style="text-align:center">' + avatar(p, 108) +
     '<h2 style="margin-top:10px;font-size:24px">' + esc(fullName(p)) + '</h2>' +
     '<p class="sub" style="font-size:16px">#' + esc(p.number) + ' · ' + esc(p.position) + statusTag(p) + '</p></div>' +
     '<div class="card"><h3 style="margin-bottom:10px">Statistieken</h3>' + statTiles(s) +
     '<p class="muted" style="font-size:12px;margin-top:8px">Alleen afgeronde wedstrijden tellen mee.</p></div>' +
+    '<button class="btn sec" data-act="pstats" data-id="' + p.id + '">📊 Statistieken aanpassen</button>' +
     '<button class="btn" data-act="editPlayer" data-id="' + p.id + '">Speler bewerken</button></div>';
 }
 
@@ -563,6 +626,7 @@ function lineupHTML() {
     (opened ? '<button class="btn" data-act="updateLineup">Opstelling bijwerken</button>' : '') +
     '<button class="btn' + (opened ? ' sec' : '') + '" data-act="saveLineup">Opstelling opslaan</button>' +
     '<button class="btn sec" data-act="shareLineup">📤 Opstelling delen</button>' +
+    '<button class="btn sec" data-act="openStats">📊 Statistieken</button>' +
     '<button class="btn sec" data-act="myLineups">Mijn opstellingen' + (savedLineups.length ? ' (' + savedLineups.length + ')' : '') + '</button>' +
     '<button class="btn ghost" data-act="newLineup">+ Nieuwe opstelling</button></div>' +
     '<section class="blk"><div class="between"><h3>Wisselspelers<span class="count">' + bench.length + '</span></h3><button class="btn small ghost" data-act="pickBenchOpen">' + ic('plus', 'sm') + ' Toevoegen</button></div>' +
@@ -650,24 +714,77 @@ function matchDetailHTML(id) {
 }
 
 /* ---------- STATISTIEKEN ---------- */
+function miniLine(p, t) {
+  const parts = [t.matches + ' wed.'];
+  if (isKeeper(p)) parts.push(t.cleanSheets + ' clean sheets');
+  else { parts.push(t.goals + ' goals'); parts.push(t.assists + ' assists'); }
+  if (t.yellow) parts.push(t.yellow + ' geel');
+  if (t.red) parts.push(t.red + ' rood');
+  return parts.join(' · ');
+}
+function topListHTML(title, rows, key, unit) {
+  const top = topRows(rows, key, 3);
+  if (!top.length) return '';
+  const medals = ['🥇', '🥈', '🥉'];
+  return '<div class="card"><h3 style="margin-bottom:4px">' + title + '</h3>' + top.map((r, i) =>
+    '<button class="topli" data-act="pstats" data-id="' + r.p.id + '"><span class="medal">' + medals[i] + '</span>' + avatar(r.p, 38) +
+    '<b>' + esc(fullName(r.p)) + '</b><span class="val">' + r.t[key] + ' ' + unit + '</span></button>').join('') + '</div>';
+}
 function statsHTML() {
-  const {per, team} = computeStats();
-  const sorts = [['goals', 'Doelpunten'], ['assists', 'Assists'], ['matches', 'Wedstrijden'], ['minutes', 'Minuten'], ['yellow', 'Geel'], ['red', 'Rood']];
+  const {rows, team} = allTotals();
+  const tt = teamTotals(rows, team);
+  const sorts = [['goals', 'Goals'], ['assists', 'Assists'], ['matches', 'Wedstrijden'], ['minutes', 'Minuten'], ['yellow', 'Geel'], ['red', 'Rood']];
+  const unit = {goals: 'goals', assists: 'assists', matches: 'wedstr.', minutes: 'min.', yellow: 'geel', red: 'rood'};
   const key = ui.statSort;
-  const list = state.players.map((p) => per[p.id]).sort((a, b) => b[key] - a[key] || b.goals - a.goals || 0);
-  const unit = {goals: 'goals', assists: 'assists', matches: 'wedstr.', minutes: 'min.', yellow: 'geel', red: 'rood'}[key];
+  const sorted = statSortedRows(rows);
   const diff = team.gf - team.ga;
+  const tile = (v, l) => '<div class="tile"><b>' + v + '</b><span>' + l + '</span></div>';
   return '<div class="page stack"><h1>Statistieken</h1>' +
-    '<div class="card"><h3 style="margin-bottom:10px">' + esc(state.team.name) + '</h3><div class="tiles">' +
-    [['Wedstrijden', team.played], ['Gewonnen', team.won], ['Gelijk', team.drawn], ['Verloren', team.lost], ['Doelpunten voor', team.gf], ['Doelpunten tegen', team.ga]].map((t) => '<div class="tile"><b>' + t[1] + '</b><span>' + t[0] + '</span></div>').join('') +
-    '</div><div class="tile" style="margin-top:8px"><b>' + (diff > 0 ? '+' : '') + diff + '</b><span>Doelsaldo</span></div>' +
-    '<p class="muted" style="font-size:12px;margin-top:8px">Alleen wedstrijden met status “Afgerond” tellen mee.</p></div>' +
-    '<div><h2>Spelersranglijst</h2><div class="pills">' + sorts.map((s) => '<button class="pill' + (key === s[0] ? ' on' : '') + '" data-act="statSort" data-v="' + s[0] + '">' + s[1] + '</button>').join('') + '</div></div>' +
-    (list.length ? list.map((s, i) => {
-      const p = P(s.id);
-      return '<button class="card" style="width:100%;text-align:left" data-act="player" data-id="' + p.id + '"><div class="rank"><div class="pos' + (i === 0 && s[key] > 0 ? ' p1' : '') + '">' + (i + 1) + '</div>' + avatar(p, 38) +
-        '<div style="min-width:0"><b>' + esc(fullName(p)) + '</b><div class="muted" style="font-size:13px">#' + esc(p.number) + ' · ' + esc(p.position) + '</div></div><div class="val">' + s[key] + '<span class="muted" style="font-size:12px;font-weight:700"> ' + unit + '</span></div></div>' + statTiles(s, key) + '</button>';
-    }).join('') : '<div class="card empty"><p>Voeg spelers en wedstrijden toe om statistieken te zien.</p></div>') + '</div>';
+    '<button class="btn sec" data-act="shareStats">📤 Statistieken delen</button>' +
+    '<div class="card"><h3 style="margin-bottom:10px">Teamstatistieken · ' + esc(state.team.name) + '</h3><div class="tiles">' +
+    tile(tt.matches, 'Wedstrijden') + tile(tt.goals, 'Goals') + tile(tt.assists, 'Assists') + tile(tt.yellow, 'Gele kaarten') + tile(tt.red, 'Rode kaarten') + tile(tt.cleanSheets, 'Clean sheets') + '</div>' +
+    (team.played ? '<div class="tiles" style="margin-top:8px">' + tile(team.won, 'Gewonnen') + tile(team.drawn, 'Gelijk') + tile(team.lost, 'Verloren') + '</div>' +
+      '<div class="tiles" style="margin-top:8px">' + tile(team.gf, 'Doelpunten voor') + tile(team.ga, 'Doelpunten tegen') + tile((diff > 0 ? '+' : '') + diff, 'Doelsaldo') + '</div>' : '') +
+    '</div>' +
+    topListHTML('Topscorers', rows, 'goals', 'goals') +
+    topListHTML('Top assists', rows, 'assists', 'assists') +
+    '<div><h2>Spelers</h2><p class="sub">Tik op een speler om statistieken direct aan te passen.</p><div class="pills">' +
+    sorts.map((x) => '<button class="pill' + (key === x[0] ? ' on' : '') + '" data-act="statSort" data-v="' + x[0] + '">' + x[1] + '</button>').join('') + '</div></div>' +
+    (sorted.length ? '<div class="list">' + sorted.map((r) =>
+      '<button class="card statrow" data-act="pstats" data-id="' + r.p.id + '">' + avatar(r.p, 50) +
+      '<div class="mid"><div class="nm">' + esc(fullName(r.p)) + '</div><div class="ps">#' + esc(r.p.number) + ' · ' + esc(r.p.position) + statusTag(r.p) + '</div><div class="mini">' + miniLine(r.p, r.t) + '</div></div>' +
+      '<div class="big">' + r.t[key] + '<small>' + unit[key] + '</small></div></button>').join('') + '</div>'
+      : emptyState('📊', 'Voeg eerst spelers toe om statistieken bij te houden.', '+ Eerste speler toevoegen', 'addPlayer')) +
+    '<p class="muted" style="font-size:12px;text-align:center">Totalen = afgeronde wedstrijden + jouw eigen aanpassingen. Alles wordt direct opgeslagen.</p></div>';
+}
+function pstatsHTML(id) {
+  const p = P(id);
+  if (!p) return '<div class="page"><p class="muted">Speler niet gevonden.</p></div>';
+  const {per} = computeStats();
+  const t = totalsFor(p, per);
+  const order = (ui.statOrder && ui.statOrder.length ? ui.statOrder.filter((x) => P(x)) : state.players.slice().sort((a, b) => a.number - b.number).map((x) => x.id));
+  const i = Math.max(0, order.indexOf(id));
+  const prev = order[(i - 1 + order.length) % order.length], next = order[(i + 1) % order.length];
+  const multi = order.length > 1;
+  const auto = per[p.id] || {};
+  const rowsHTML = relevantStatKeys(p, t).map((k) => {
+    const hints = [];
+    if (auto[k]) hints.push(auto[k] + ' uit wedstrijden');
+    if (STAT_STEP[k]) hints.push('stappen van ' + STAT_STEP[k]);
+    return '<div class="srow"><div class="lb">' + STAT_LABEL[k] + (hints.length ? '<small>' + hints.join(' · ') + '</small>' : '') + '</div><div class="ctl">' +
+      '<button class="step" data-act="statStep" data-id="' + p.id + '" data-k="' + k + '" data-d="-1" aria-label="Eén minder">−</button>' +
+      '<input class="sval" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="' + t[k] + '" data-change="statValue" data-id="' + p.id + '" data-k="' + k + '" aria-label="' + STAT_LABEL[k] + '">' +
+      '<button class="step" data-act="statStep" data-id="' + p.id + '" data-k="' + k + '" data-d="1" aria-label="Eén meer">+</button></div></div>';
+  }).join('');
+  return '<div class="page stack">' +
+    '<div class="card"><div class="pnav">' +
+    (multi ? '<button class="nav" data-act="pstats" data-nav="1" data-id="' + prev + '" aria-label="Vorige speler">‹</button>' : '<span class="nav ph"></span>') +
+    '<div class="mid">' + avatar(p, 104) + '<h2 style="margin-top:8px;font-size:23px">' + esc(fullName(p)) + '</h2>' +
+    '<p class="sub">#' + esc(p.number) + ' · ' + esc(p.position) + statusTag(p) + '</p></div>' +
+    (multi ? '<button class="nav" data-act="pstats" data-nav="1" data-id="' + next + '" aria-label="Volgende speler">›</button>' : '<span class="nav ph"></span>') +
+    '</div></div>' +
+    '<div class="card">' + rowsHTML + '<p class="sub" style="margin-top:10px">✓ Wijzigingen worden direct opgeslagen. Tik op een getal om het te typen.</p></div>' +
+    '<button class="btn sec" data-act="player" data-id="' + p.id + '">Spelerprofiel openen</button></div>';
 }
 
 /* ---------- INSTELLINGEN ---------- */
@@ -953,6 +1070,19 @@ function act(name, d) {
     case 'player': goSub('player', d.id); break;
     case 'sort': ui.sort = d.v; render(); break;
     case 'statSort': ui.statSort = d.v; render(); break;
+    case 'openStats': goTab('stats'); break;
+    case 'pstats': {
+      if (!d.nav) ui.statOrder = statSortedRows(allTotals().rows).map((r) => r.p.id);
+      ui.tab = 'stats'; ui.sub = {type: 'pstats', id: d.id}; resetScroll = true; render(); break;
+    }
+    case 'statStep': {
+      const p = P(d.id); if (!p || !STAT_KEYS.includes(d.k)) break;
+      const per = computeStats().per;
+      const cur = totalsFor(p, per)[d.k];
+      setStatTotal(p, d.k, Math.max(0, cur + (STAT_STEP[d.k] || 1) * (+d.d)), per);
+      save(); buzz(6); render(); break;
+    }
+    case 'shareStats': shareStats(); break;
     case 'clearPhoto': formTmp.photo = null; $('#photoPrev').innerHTML = avatar(null, 72); break;
     case 'deletePlayer': {
       const p = P(d.id); if (!p) break;
@@ -1082,6 +1212,10 @@ document.addEventListener('click', (e) => {
   }
 });
 
+document.addEventListener('focusin', (e) => {
+  const el = e.target;
+  if (el && el.classList && el.classList.contains('sval')) setTimeout(() => { try { el.setSelectionRange(0, 99); } catch (err) { /* negeer */ } }, 0);
+});
 document.addEventListener('input', (e) => {
   if (e.target.id === 'q') { ui.q = e.target.value; const el = $('#playerList'); if (el) el.innerHTML = playerListHTML(); }
 });
@@ -1093,6 +1227,14 @@ document.addEventListener('change', async (e) => {
   else if (k === 'lineupKey') { ui.lineupKey = t.value; ui.sel = null; render(); }
   else if (k === 'formation') { setFormation(curLineup(), t.value); save(); render(); }
   else if (k === 'status' && m) { m.status = t.value === 'afgerond' ? 'afgerond' : 'gepland'; if (m.status === 'afgerond') autoMinutes(m, false); save(); render(); }
+  else if (k === 'statValue') {
+    const p = P(t.dataset.id), key = t.dataset.k;
+    if (p && STAT_KEYS.includes(key)) {
+      const digits = String(t.value).replace(/[^0-9]/g, '');
+      if (digits !== '') { setStatTotal(p, key, Math.min(99999, parseInt(digits, 10))); save(); }
+      render();
+    }
+  }
   else if (k === 'teamName') { state.team.name = t.value.trim() || 'Mijn team'; save(); }
   else if (k === 'defaultFormation') { state.settings.defaultFormation = t.value; setFormation(getLineup('default'), t.value); save(); toast('Standaardformatie ingesteld'); }
   else if (k === 'logo' && t.files && t.files[0]) {
@@ -1430,6 +1572,134 @@ async function buildShareCanvas() {
 }
 function canvasToBlob(canvas) {
   return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob'))), 'image/png'));
+}
+async function buildStatsCanvas() {
+  const dark = isDarkNow();
+  const C = dark
+    ? {bg: '#0e1512', card: '#18221d', text: '#eaf1ed', muted: '#9aaba2', line: '#2b3832', brand: '#4fd08a'}
+    : {bg: '#f1f4f2', card: '#ffffff', text: '#15211b', muted: '#66736c', line: '#dfe6e2', brand: '#14583a'};
+  const FONT = '-apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif';
+  const W = 1080, M = 60;
+  const {rows, team} = allTotals();
+  const tt = teamTotals(rows, team);
+  const sections = [];
+  const sc = topRows(rows, 'goals', 5), as = topRows(rows, 'assists', 5), cs = topRows(rows, 'cleanSheets', 3);
+  if (sc.length) sections.push({title: 'TOPSCORERS', rows: sc, key: 'goals', unit: 'Goals'});
+  if (as.length) sections.push({title: 'TOP ASSISTS', rows: as, key: 'assists', unit: 'Assists'});
+  if (cs.length) sections.push({title: 'CLEAN SHEETS', rows: cs, key: 'cleanSheets', unit: 'Clean sheets'});
+  const logo = await loadImg(state.team.logo);
+  const imgs = {};
+  const ids = new Set();
+  sections.forEach((sec) => sec.rows.forEach((r) => ids.add(r.p.id)));
+  await Promise.all(Array.from(ids).map(async (id) => { const q = P(id); if (q && q.photo) imgs[id] = await loadImg(q.photo); }));
+
+  const HEAD = 290, TITLE = 84, ROW = 124, TILE_H = 150, GAP = 36;
+  const hasAny = sections.length > 0;
+  const teamH = TITLE + TILE_H + 30;
+  let H = HEAD + 40 + teamH;
+  sections.forEach((sec) => { H += GAP + TITLE + sec.rows.length * ROW + 20; });
+  if (!hasAny) H += GAP + 200;
+  H = Math.max(1350, H + 150);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const g = canvas.getContext('2d');
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+
+  const grd = g.createLinearGradient(0, 0, 0, HEAD);
+  grd.addColorStop(0, dark ? '#0a2a1a' : '#0b3d24'); grd.addColorStop(1, '#14583a');
+  g.fillStyle = grd; g.fillRect(0, 0, W, HEAD);
+  let tx = M;
+  if (logo) {
+    g.save(); rrect(g, M, 56, 130, 130, 28); g.clip();
+    const k = Math.min(130 / logo.width, 130 / logo.height);
+    g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(M, 56, 130, 130);
+    g.drawImage(logo, M + (130 - logo.width * k) / 2, 56 + (130 - logo.height * k) / 2, logo.width * k, logo.height * k);
+    g.restore(); tx = M + 160;
+  }
+  g.textBaseline = 'alphabetic'; g.textAlign = 'left';
+  const pillW = 230;
+  g.fillStyle = '#ffffff';
+  fitFont(g, state.team.name.toUpperCase(), W - tx - M - pillW - 20, 70, 36, '900', FONT);
+  g.fillText(state.team.name.toUpperCase(), tx, 125);
+  g.fillStyle = 'rgba(255,255,255,.88)'; g.font = '700 42px ' + FONT;
+  g.fillText('SEIZOEN ' + seasonLabel(), tx, 185);
+  rrect(g, W - M - pillW, 70, pillW, 90, 45); g.fillStyle = '#ffffff'; g.fill();
+  g.fillStyle = '#0b3d24'; g.font = '900 44px ' + FONT; g.textAlign = 'center';
+  g.fillText('STATS', W - M - pillW / 2, 130); g.textAlign = 'left';
+  g.fillStyle = '#f5c518'; g.font = '800 40px ' + FONT;
+  g.fillText('STATISTIEKEN', M, 262);
+
+  const panel = (y, h) => { rrect(g, M, y, W - 2 * M, h, 32); g.fillStyle = C.card; g.fill(); g.lineWidth = 2; g.strokeStyle = C.line; g.stroke(); };
+  const title = (t, y) => { g.fillStyle = C.muted; g.font = '800 34px ' + FONT; g.textAlign = 'left'; g.fillText(t, M + 36, y + 56); };
+
+  let y = HEAD + 40;
+  panel(y, teamH);
+  title('TEAMSTATISTIEKEN', y);
+  const tiles = [['Wedstrijden', tt.matches], ['Goals', tt.goals], ['Assists', tt.assists], ['Gele kaarten', tt.yellow], ['Rode kaarten', tt.red]];
+  const tw = (W - 2 * M - 72) / tiles.length;
+  tiles.forEach((tl, i) => {
+    const cx = M + 36 + tw * i + tw / 2;
+    g.textAlign = 'center';
+    g.fillStyle = C.text; g.font = '900 64px ' + FONT; g.fillText(String(tl[1]), cx, y + TITLE + 66);
+    g.fillStyle = C.muted; fitFont(g, tl[0], tw - 12, 25, 18, '700', FONT); g.fillText(tl[0], cx, y + TITLE + 108);
+  });
+  g.textAlign = 'left';
+  y += teamH + GAP;
+
+  const rankCol = ['#d4a017', '#9aa3a8', '#b8733f'];
+  sections.forEach((sec) => {
+    const h = TITLE + sec.rows.length * ROW + 20;
+    panel(y, h);
+    title(sec.title, y);
+    sec.rows.forEach((r, i) => {
+      const ry = y + TITLE + i * ROW, cy = ry + ROW / 2 - 4;
+      if (i > 0) { g.fillStyle = C.line; g.fillRect(M + 36, ry - 2, W - 2 * M - 72, 2); }
+      const rcx = M + 36 + 30;
+      g.beginPath(); g.arc(rcx, cy, 30, 0, Math.PI * 2); g.fillStyle = rankCol[i] || '#6b7a72'; g.fill();
+      g.fillStyle = '#ffffff'; g.font = '900 32px ' + FONT; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(String(i + 1), rcx, cy + 2);
+      const pcx = rcx + 30 + 20 + 48;
+      g.beginPath(); g.arc(pcx, cy, 48, 0, Math.PI * 2); g.fillStyle = '#14583a'; g.fill();
+      if (imgs[r.p.id]) {
+        drawPhoto(g, imgs[r.p.id], pcx, cy, 48);
+        g.beginPath(); g.arc(pcx, cy, 48, 0, Math.PI * 2); g.lineWidth = 4; g.strokeStyle = C.card; g.stroke();
+      } else {
+        g.fillStyle = '#ffffff'; g.font = '900 38px ' + FONT; g.fillText(String(r.p.number), pcx, cy + 2);
+      }
+      g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+      const nx = pcx + 48 + 28, nmax = W - M - 36 - nx;
+      g.fillStyle = C.text; fitFont(g, fullName(r.p), nmax, 44, 26, '800', FONT);
+      g.fillText(clipText(g, fullName(r.p), nmax), nx, cy - 6);
+      g.fillStyle = C.brand; g.font = '800 38px ' + FONT;
+      g.fillText(r.t[sec.key] + ' ' + sec.unit, nx, cy + 44);
+    });
+    y += h + GAP;
+  });
+  if (!hasAny) {
+    panel(y, 200);
+    g.fillStyle = C.muted; g.font = '700 36px ' + FONT; g.textAlign = 'center';
+    g.fillText('Nog geen goals of assists geregistreerd', W / 2, y + 112); g.textAlign = 'left';
+  }
+  g.textAlign = 'center'; g.fillStyle = C.muted; g.font = '700 30px ' + FONT;
+  g.fillText('TeamSheet · v' + APP_VERSION, W / 2, H - 56);
+  g.textAlign = 'left';
+  return canvas;
+}
+async function shareStats() {
+  toast('Statistiekenkaart maken…');
+  let blob;
+  try { blob = await canvasToBlob(await buildStatsCanvas()); }
+  catch (e) { toast('Statistiekenkaart maken mislukt'); return; }
+  const file = new File([blob], 'teamsheet-statistieken-' + todayStr() + '.png', {type: 'image/png'});
+  lastShare = {blob, file, title: 'Statistieken ' + state.team.name};
+  if (navigator.canShare && navigator.canShare({files: [file]})) {
+    try { await navigator.share({files: [file], title: lastShare.title}); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  if (shareUrl) URL.revokeObjectURL(shareUrl);
+  shareUrl = URL.createObjectURL(blob);
+  openModal('sharePreview', {url: shareUrl});
 }
 async function shareLineup() {
   toast('Share Card maken…');

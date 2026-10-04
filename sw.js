@@ -6,7 +6,7 @@
  * NIEUWE RELEASE? Verhoog VERSION hieronder (en APP_VERSION in app.js) – meer is niet nodig.
  * Gebruikersgegevens staan in IndexedDB/localStorage en worden hier NOOIT aangeraakt.
  */
-const VERSION = '1.3';
+const VERSION = '1.4';
 const CACHE = 'teamsheet-v' + VERSION;
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
